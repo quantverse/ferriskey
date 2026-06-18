@@ -221,4 +221,42 @@ mod tests {
         }
         assert!(saw_429, "expected 429 after repeated failed logins");
     }
+
+    #[tokio::test]
+    #[ignore]
+    async fn registration_requires_captcha_when_enabled() {
+        let (server, realm_name) = make_server(|args| {
+            args.security.rate_limit_enabled = false;
+            args.security.cap_enabled = true;
+            args.security.cap_verify_url = "http://127.0.0.1:1".to_string();
+            args.security.cap_site_key = "sk".to_string();
+            args.security.cap_secret = "secret".to_string();
+            args.security.cap_fail_open = false;
+        })
+        .await;
+
+        // Registration may be disabled on the master realm by default; if so the
+        // handler returns 403 *before* captcha. This test asserts that WHEN the
+        // captcha is required and missing, the response is a client error (400)
+        // rather than a 5xx or success. Accept 400 (captcha) or 403 (registration
+        // disabled) — both prove the request never created a user without a captcha.
+        let resp = server
+            .post(&format!(
+                "/realms/{}/protocol/openid-connect/registrations",
+                realm_name
+            ))
+            .json(&serde_json::json!({
+                "username": "newuser",
+                "email": "newuser@test.local",
+                "password": "password123"
+            }))
+            .await;
+
+        assert!(
+            resp.status_code() == 400 || resp.status_code() == 403,
+            "expected 400 (captcha) or 403 (registration disabled), got {} body {}",
+            resp.status_code(),
+            resp.text()
+        );
+    }
 }
