@@ -16,8 +16,7 @@ mod tests {
     use axum_test::TestServer;
     use ferriskey_api::{
         application::http::{
-            authentication::router::authentication_routes,
-            server::app_state::AppState,
+            authentication::router::authentication_routes, server::app_state::AppState,
             trident::router::trident_routes,
         },
         args::Args,
@@ -349,7 +348,10 @@ mod tests {
                 break;
             }
         }
-        assert!(saw_429, "expected 429 on trident forgot-password after burst");
+        assert!(
+            saw_429,
+            "expected 429 on trident forgot-password after burst"
+        );
     }
 
     #[tokio::test]

@@ -6,7 +6,6 @@ use utoipa::OpenApi;
 
 use crate::application::{
     auth::{auth, auth_login_actions},
-    security::rate_limit::auth_rate_limit,
     http::{
         server::app_state::AppState,
         trident::handlers::{
@@ -41,6 +40,7 @@ use crate::application::{
             },
         },
     },
+    security::rate_limit::auth_rate_limit,
 };
 
 #[derive(OpenApi)]
@@ -203,5 +203,8 @@ pub fn trident_routes(state: AppState) -> Router<AppState> {
     public_routes
         .merge(login_action_routes)
         .merge(bearer_protected_routes)
-        .layer(middleware::from_fn_with_state(state.clone(), auth_rate_limit))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_rate_limit,
+        ))
 }
