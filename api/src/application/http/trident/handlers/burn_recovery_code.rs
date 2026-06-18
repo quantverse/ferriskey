@@ -6,6 +6,7 @@ use ferriskey_core::domain::{
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+use uuid::Uuid;
 use validator::Validate;
 
 use crate::application::http::server::{
@@ -60,7 +61,16 @@ pub async fn burn_recovery_code(
         .value()
         .to_string();
 
-    let result = state
+    let bf_realm = Uuid::from(identity.realm_id()).to_string();
+    let bf_key = format!("recovery:{}", identity.id());
+
+    if state.brute_force.check(&bf_realm, &bf_key) {
+        return Err(ApiError::TooManyRequests(
+            "too many incorrect codes, try again later".into(),
+        ));
+    }
+
+    let result = match state
         .service
         .burn_recovery_code(
             identity,
@@ -71,7 +81,16 @@ pub async fn burn_recovery_code(
             },
         )
         .await
-        .map_err(ApiError::from)?;
+    {
+        Ok(result) => {
+            state.brute_force.record_success(&bf_realm, &bf_key);
+            result
+        }
+        Err(e) => {
+            state.brute_force.record_failure(&bf_realm, &bf_key);
+            return Err(ApiError::from(e));
+        }
+    };
 
     Ok(Response::OK(BurnRecoveryCodeResponse {
         login_url: result.login_url,

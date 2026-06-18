@@ -12,6 +12,7 @@ use ferriskey_core::domain::trident::ports::{ChallengeOtpInput, TridentService};
 use ferriskey_core::domain::user::entities::RequiredAction;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+use uuid::Uuid;
 use validator::Validate;
 
 #[derive(Debug, Serialize, Deserialize, Validate, ToSchema)]
@@ -58,7 +59,16 @@ pub async fn challenge_otp(
         .value()
         .to_string();
 
-    let result = state
+    let bf_realm = Uuid::from(identity.realm_id()).to_string();
+    let bf_key = format!("otp:{}", identity.id());
+
+    if state.brute_force.check(&bf_realm, &bf_key) {
+        return Err(ApiError::TooManyRequests(
+            "too many incorrect codes, try again later".into(),
+        ));
+    }
+
+    let result = match state
         .service
         .challenge_otp(
             identity,
@@ -68,7 +78,16 @@ pub async fn challenge_otp(
             },
         )
         .await
-        .map_err(|e| ApiError::InternalServerError(e.to_string().into()))?;
+    {
+        Ok(result) => {
+            state.brute_force.record_success(&bf_realm, &bf_key);
+            result
+        }
+        Err(e) => {
+            state.brute_force.record_failure(&bf_realm, &bf_key);
+            return Err(ApiError::InternalServerError(e.to_string().into()));
+        }
+    };
 
     let response = ChallengeOtpResponse {
         url: result.login_url,
