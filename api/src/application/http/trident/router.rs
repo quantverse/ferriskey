@@ -6,6 +6,7 @@ use utoipa::OpenApi;
 
 use crate::application::{
     auth::{auth, auth_login_actions},
+    security::rate_limit::auth_rate_limit,
     http::{
         server::app_state::AppState,
         trident::handlers::{
@@ -198,8 +199,9 @@ pub fn trident_routes(state: AppState) -> Router<AppState> {
         )
         .layer(middleware::from_fn_with_state(state.clone(), auth));
 
-    // Merge all routers
+    // Merge all routers and apply per-IP rate limiter to all trident login-actions routes
     public_routes
         .merge(login_action_routes)
         .merge(bearer_protected_routes)
+        .layer(middleware::from_fn_with_state(state.clone(), auth_rate_limit))
 }
