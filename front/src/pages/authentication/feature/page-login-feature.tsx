@@ -33,7 +33,7 @@ export default function PageLoginFeature() {
 
   const { data: loginSettings } = useGetLoginSettings({ realm: realm_name })
 
-  const { form, onSubmit, errorMessage, isSessionError, resetAuthenticate } = useLoginForm({
+  const { form, onSubmit, errorMessage, isSessionError, resetAuthenticate, setCaptchaToken } = useLoginForm({
     realm_name,
     loginError,
     getAuthParamsFromUrl,
@@ -73,7 +73,7 @@ export default function PageLoginFeature() {
   }, [isRedirecting, getOAuthParams])
 
   if (isRedirecting) {
-    return <PageLogin form={form} onSubmit={onSubmit} isLoading loginSettings={loginSettings} />
+    return <PageLogin form={form} onSubmit={onSubmit} isLoading loginSettings={loginSettings} onCaptchaSolve={setCaptchaToken} />
   }
 
   // Fatal configuration error (e.g. "Invalid redirect URI", "Client not found").
@@ -101,6 +101,7 @@ export default function PageLoginFeature() {
         magicLinkForm={magicLinkForm}
         onMagicLinkSubmit={onMagicLinkSubmit}
         onMagicLinkBack={onMagicLinkBack}
+        onCaptchaSolve={setCaptchaToken}
       />
       <FloatingActionBar
         show={showFloatingActionBar}

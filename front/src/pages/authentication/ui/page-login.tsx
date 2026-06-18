@@ -1,3 +1,4 @@
+import { CapCaptcha } from '@/components/cap-captcha'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Form, FormField } from '@/components/ui/form'
@@ -32,6 +33,7 @@ export interface PageLoginProps {
   magicLinkForm?: UseFormReturn<MagicLinkSchema>
   onMagicLinkSubmit?: (data: MagicLinkSchema) => void
   onMagicLinkBack?: () => void
+  onCaptchaSolve?: (token: string) => void
 }
 
 export default function PageLogin({
@@ -49,6 +51,7 @@ export default function PageLogin({
   magicLinkForm,
   onMagicLinkSubmit,
   onMagicLinkBack,
+  onCaptchaSolve,
 }: PageLoginProps) {
   const { realm_name } = useParams()
 
@@ -149,6 +152,7 @@ export default function PageLogin({
                             </div>
                           )}
                         </div>
+                        {onCaptchaSolve && <CapCaptcha onSolve={onCaptchaSolve} />}
                         <Button type='submit' className='w-full rounded-lg py-5 text-sm'>
                           Login
                         </Button>

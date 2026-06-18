@@ -53,7 +53,7 @@ type AuthQueryParams = {
 }
 
 export interface AuthenticatePayload {
-  data: Schemas.AuthenticateRequest
+  data: Schemas.AuthenticateRequest & { captcha_token?: string }
   realm: string
   clientId: string
   useToken?: boolean
