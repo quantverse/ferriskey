@@ -41,7 +41,7 @@ pub struct TokenRequestValidator {
     #[serde(default)]
     pub code_verifier: Option<String>,
 
-    // Cap captcha token (required for public-client password grants when captcha is enabled)
+    // Cap (PoW) captcha token, verified server-side (required for public-client password grants when captcha is enabled)
     #[serde(default)]
     pub captcha_token: Option<String>,
 }

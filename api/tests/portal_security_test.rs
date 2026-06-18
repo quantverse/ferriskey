@@ -288,12 +288,15 @@ mod tests {
             ])
             .await;
 
-        assert_eq!(resp.status_code(), 400, "missing captcha on public ROPC should be 400, body: {}", resp.text());
+        let status = resp.status_code();
+        let body = resp.text();
+        assert_eq!(status, 400, "missing captcha on public ROPC should be 400, body: {body}");
+        assert!(body.contains("captcha token required"), "expected captcha-required message, body: {body}");
     }
 
     #[tokio::test]
     #[ignore]
-    async fn confidential_grants_exempt_from_captcha() {
+    async fn non_password_grant_exempt_from_captcha() {
         let (server, realm_name) = make_server(|args| {
             args.security.rate_limit_enabled = false;
             args.security.cap_enabled = true;
@@ -304,8 +307,9 @@ mod tests {
         })
         .await;
 
-        // client_credentials grant carries no username/password and is exempt;
-        // it must NOT be blocked by the captcha (it will fail auth for other
+        // Verifies that a non-password grant (client_credentials) is exempt from
+        // captcha checks. The client_credentials grant carries no username/password
+        // and must NOT be blocked by the captcha (it will fail auth for other
         // reasons, but never with the captcha 400 "captcha token required").
         let resp = server
             .post(&format!("/realms/{}/protocol/openid-connect/token", realm_name))
