@@ -34,6 +34,7 @@ pub enum ApiError {
     Forbidden(Cow<'static, str>),
     BadRequest(Cow<'static, str>),
     ServiceUnavailable(Cow<'static, str>),
+    TooManyRequests(Cow<'static, str>),
     /// RFC 6749 §5.2 OAuth2 error response
     OAuthError {
         error: Cow<'static, str>,
@@ -251,6 +252,16 @@ impl IntoResponse for ApiError {
                 Json(ApiErrorResponse {
                     code: "E_SERVICE_UNAVAILABLE".to_string(),
                     status: 503,
+                    message: message.into(),
+                }),
+            )
+                .into_response(),
+            ApiError::TooManyRequests(message) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(axum::http::header::RETRY_AFTER, "60")],
+                Json(ApiErrorResponse {
+                    code: "E_TOO_MANY_REQUESTS".to_string(),
+                    status: 429,
                     message: message.into(),
                 }),
             )
