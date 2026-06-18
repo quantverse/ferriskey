@@ -70,6 +70,30 @@ pub async fn exchange_token(
     let has_code = payload.code.is_some();
     let has_refresh_token = payload.refresh_token.is_some();
 
+    let is_public_password_grant =
+        payload.grant_type == GrantType::Password && client_secret.is_none();
+
+    // Capture values needed for brute-force recording before they are moved.
+    let realm_for_bf = realm_name.clone();
+    let payload_username = payload.username.clone();
+
+    if is_public_password_grant {
+        // CAPTCHA (no-op when disabled).
+        state
+            .captcha
+            .verify(payload.captcha_token.as_deref())
+            .await?;
+
+        // Per-account brute-force throttle (keyed by realm + username).
+        if let Some(username) = payload_username.as_deref() {
+            if state.brute_force.check(&realm_for_bf, username) {
+                return Err(ApiError::TooManyRequests(
+                    "too many failed login attempts, try again later".into(),
+                ));
+            }
+        }
+    }
+
     let is_secure = base_url.starts_with("https://");
     let base_url = root_scoped_base_url(&base_url, &state.args.server.root_path);
 
@@ -100,8 +124,20 @@ pub async fn exchange_token(
         }
     } else {
         match state.service.exchange_token(exchange_input).await {
-            Ok(token) => token,
+            Ok(token) => {
+                if is_public_password_grant {
+                    if let Some(username) = payload_username.as_deref() {
+                        state.brute_force.record_success(&realm_for_bf, username);
+                    }
+                }
+                token
+            }
             Err(error) => {
+                if is_public_password_grant {
+                    if let Some(username) = payload_username.as_deref() {
+                        state.brute_force.record_failure(&realm_for_bf, username);
+                    }
+                }
                 warn!(
                     client_id = %client_id,
                     grant_type = ?grant_type,

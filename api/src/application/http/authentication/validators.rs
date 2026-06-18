@@ -40,6 +40,10 @@ pub struct TokenRequestValidator {
     // PKCE verifier (RFC 7636 §4.5)
     #[serde(default)]
     pub code_verifier: Option<String>,
+
+    // Cap captcha token (required for public-client password grants when captcha is enabled)
+    #[serde(default)]
+    pub captcha_token: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, ToSchema)]
