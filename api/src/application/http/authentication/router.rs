@@ -26,7 +26,11 @@ use super::handlers::{
     userinfo::{__path_get_userinfo, get_userinfo},
     verify_email::{__path_verify_email_handler, verify_email_handler},
 };
-use crate::application::{auth::auth, http::server::app_state::AppState};
+use crate::application::{
+    auth::auth,
+    http::server::app_state::AppState,
+    security::rate_limit::auth_rate_limit,
+};
 
 #[derive(OpenApi)]
 #[openapi(paths(
@@ -51,7 +55,36 @@ use crate::application::{auth::auth, http::server::app_state::AppState};
 pub struct AuthenticationApiDoc;
 
 pub fn authentication_routes(state: AppState, root_path: &str) -> Router<AppState> {
-    Router::new()
+    // Sensitive, attacker-reachable endpoints get the per-IP rate-limit layer.
+    let limited = Router::new()
+        .route(
+            &format!("{root_path}/realms/{{realm_name}}/protocol/openid-connect/token"),
+            post(exchange_token),
+        )
+        .route(
+            &format!("{root_path}/realms/{{realm_name}}/protocol/openid-connect/registrations"),
+            post(registration_handler),
+        )
+        .route(
+            &format!("{root_path}/realms/{{realm_name}}/login-actions/authenticate"),
+            post(authenticate),
+        )
+        .route(
+            &format!("{root_path}/realms/{{realm_name}}/login-actions/verify-email"),
+            post(verify_email_handler),
+        )
+        .route(
+            &format!("{root_path}/realms/{{realm_name}}/login-actions/resend-verification-email"),
+            post(resend_verification_email_handler),
+        )
+        .route(
+            &format!("{root_path}/realms/{{realm_name}}/protocol/openid-connect/auth"),
+            get(auth_handler),
+        )
+        .layer(middleware::from_fn_with_state(state.clone(), auth_rate_limit));
+
+    // Userinfo keeps the existing auth middleware; everything else is unrestricted.
+    let rest = Router::new()
         .route(
             &format!("{root_path}/realms/{{realm_name}}/protocol/openid-connect/userinfo"),
             get(get_userinfo),
@@ -61,10 +94,6 @@ pub fn authentication_routes(state: AppState, root_path: &str) -> Router<AppStat
             post(get_userinfo),
         )
         .layer(middleware::from_fn_with_state(state.clone(), auth))
-        .route(
-            &format!("{root_path}/realms/{{realm_name}}/protocol/openid-connect/token"),
-            post(exchange_token),
-        )
         .route(
             &format!("{root_path}/realms/{{realm_name}}/protocol/openid-connect/auth/device"),
             post(device_authorization),
@@ -94,26 +123,6 @@ pub fn authentication_routes(state: AppState, root_path: &str) -> Router<AppStat
             post(logout_post),
         )
         .route(
-            &format!("{root_path}/realms/{{realm_name}}/protocol/openid-connect/auth"),
-            get(auth_handler),
-        )
-        .route(
-            &format!("{root_path}/realms/{{realm_name}}/protocol/openid-connect/registrations"),
-            post(registration_handler),
-        )
-        .route(
-            &format!("{root_path}/realms/{{realm_name}}/login-actions/authenticate"),
-            post(authenticate),
-        )
-        .route(
-            &format!("{root_path}/realms/{{realm_name}}/login-actions/verify-email"),
-            post(verify_email_handler),
-        )
-        .route(
-            &format!("{root_path}/realms/{{realm_name}}/login-actions/resend-verification-email"),
-            post(resend_verification_email_handler),
-        )
-        .route(
             &format!("{root_path}/realms/{{realm_name}}/protocol/openid-connect/certs"),
             get(get_certs),
         )
@@ -128,5 +137,7 @@ pub fn authentication_routes(state: AppState, root_path: &str) -> Router<AppStat
         .route(
             &format!("{root_path}/realms/{{realm_name}}/.well-known/openid-configuration"),
             get(get_openid_configuration),
-        )
+        );
+
+    limited.merge(rest)
 }

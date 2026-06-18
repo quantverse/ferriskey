@@ -2,7 +2,9 @@ use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
-use axum::extract::{ConnectInfo, Request};
+use axum::extract::{ConnectInfo, Request, State};
+use axum::middleware::Next;
+use axum::response::Response;
 use governor::clock::DefaultClock;
 use governor::state::keyed::DashMapStateStore;
 use governor::{Quota, RateLimiter};
@@ -41,6 +43,27 @@ pub fn client_ip(req: &Request) -> String {
     }
 
     "unknown".to_string()
+}
+
+use crate::application::http::server::api_entities::api_error::ApiError;
+use crate::application::http::server::app_state::AppState;
+
+/// Axum middleware: rejects with 429 when the per-IP limiter trips.
+/// No-op when `RATE_LIMIT_ENABLED=false`.
+pub async fn auth_rate_limit(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    if !state.args.security.rate_limit_enabled {
+        return Ok(next.run(req).await);
+    }
+
+    let ip = client_ip(&req);
+    match state.rate_limiter.check_key(&ip) {
+        Ok(_) => Ok(next.run(req).await),
+        Err(_) => Err(ApiError::TooManyRequests("Too many requests".into())),
+    }
 }
 
 #[cfg(test)]
