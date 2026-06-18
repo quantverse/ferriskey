@@ -3,7 +3,7 @@ import PageRegister from '../ui/page-register'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useNavigate, useParams } from 'react-router'
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { useRegistrationMutation } from '@/api/auth.api'
 import { useAuth } from '@/hooks/use-auth'
 import { RouterParams } from '@/routes/router'
@@ -29,6 +29,7 @@ export default function PageRegisterFeature() {
   const { realm_name } = useParams<RouterParams>()
   const { mutate: registration, data } = useRegistrationMutation()
   const { setAuthTokens } = useAuth()
+  const captchaToken = useRef<string | undefined>(undefined)
 
   const backToLogin = () => {
     navigate('../login')
@@ -55,7 +56,8 @@ export default function PageRegisterFeature() {
         last_name: data.lastName,
         password: data.password,
         username: data.username,
-      },
+        captcha_token: captchaToken.current,
+      } as never,
       path: {
         realm_name: realm_name ?? 'master',
       },
@@ -85,5 +87,14 @@ export default function PageRegisterFeature() {
     }
   }, [data, setAuthTokens, navigate, realm_name, form])
 
-  return <PageRegister form={form} onSubmit={onSubmit} backToLogin={backToLogin} />
+  return (
+    <PageRegister
+      form={form}
+      onSubmit={onSubmit}
+      backToLogin={backToLogin}
+      onCaptchaSolve={(t) => {
+        captchaToken.current = t
+      }}
+    />
+  )
 }

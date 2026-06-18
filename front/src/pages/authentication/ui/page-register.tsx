@@ -1,3 +1,4 @@
+import { CapCaptcha } from '@/components/cap-captcha'
 import { Card, CardContent } from '@/components/ui/card'
 import { Form, FormField } from '@/components/ui/form'
 import { UseFormReturn } from 'react-hook-form'
@@ -11,9 +12,10 @@ export interface PageRegisterProps {
   form: UseFormReturn<RegisterSchema>
   onSubmit: (data: RegisterSchema) => void
   backToLogin?: () => void
+  onCaptchaSolve?: (token: string) => void
 }
 
-export default function PageRegister({ form, onSubmit, backToLogin }: PageRegisterProps) {
+export default function PageRegister({ form, onSubmit, backToLogin, onCaptchaSolve }: PageRegisterProps) {
   const { realm_name } = useParams()
 
   return (
@@ -153,6 +155,7 @@ export default function PageRegister({ form, onSubmit, backToLogin }: PageRegist
                       </div>
 
                       <div className='flex flex-col gap-2'>
+                        {onCaptchaSolve && <CapCaptcha onSolve={onCaptchaSolve} />}
                         <Button className='w-full'>Create Account</Button>
 
                         <Button type='button' variant='outline' onClick={backToLogin} className='w-full'>

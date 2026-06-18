@@ -1,5 +1,5 @@
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useCallback, useEffect } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { useForm } from 'react-hook-form'
 import { useNavigate } from 'react-router'
 import { z } from 'zod'
@@ -29,6 +29,12 @@ export function useLoginForm({ realm_name, loginError, getAuthParamsFromUrl }: O
     error: authenticateError,
     reset: resetAuthenticate,
   } = useAuthenticateMutation()
+
+  const captchaTokenRef = useRef<string | undefined>(undefined)
+
+  const setCaptchaToken = useCallback((token: string) => {
+    captchaTokenRef.current = token
+  }, [])
 
   const form = useForm<AuthenticateSchema>({
     resolver: zodResolver(authenticateSchema),
@@ -63,7 +69,7 @@ export function useLoginForm({ realm_name, loginError, getAuthParamsFromUrl }: O
     (data: AuthenticateSchema) => {
       const { clientId } = getAuthParamsFromUrl()
       authenticate({
-        data,
+        data: { ...data, captcha_token: captchaTokenRef.current },
         realm: realm_name ?? 'master',
         clientId,
       })
@@ -93,5 +99,6 @@ export function useLoginForm({ realm_name, loginError, getAuthParamsFromUrl }: O
     errorMessage,
     isSessionError,
     resetAuthenticate,
+    setCaptchaToken,
   }
 }
