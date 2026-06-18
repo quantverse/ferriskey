@@ -22,12 +22,15 @@ pub fn build_rate_limiter(per_min: u32, burst: u32) -> Arc<KeyedRateLimiter> {
 
 /// Determine the client IP for rate-limit keying.
 ///
-/// nginx is configured to OVERWRITE `X-Forwarded-For` with the real client
-/// address (`$remote_addr`), so the left-most value is trustworthy. If the
-/// header is absent (API hit directly, e.g. tests), fall back to the socket
-/// peer address from `ConnectInfo`.
-pub fn client_ip(req: &Request) -> String {
-    if let Some(xff) = req.headers().get("x-forwarded-for")
+/// When `trust_forwarded_for` is `true` (i.e. `TRUSTED_PROXY=true`), the
+/// left-most value of `X-Forwarded-For` is used, which is trustworthy only
+/// when the fronting reverse proxy OVERWRITES the header with `$remote_addr`.
+/// When `false` (the default / fail-safe), the socket peer address from
+/// `ConnectInfo` is used regardless of any XFF header, preventing an attacker
+/// from spoofing the header to evade the rate limiter in a no-proxy deploy.
+pub fn client_ip(req: &Request, trust_forwarded_for: bool) -> String {
+    if trust_forwarded_for
+        && let Some(xff) = req.headers().get("x-forwarded-for")
         && let Ok(value) = xff.to_str()
         && let Some(first) = value.split(',').next()
     {
@@ -58,7 +61,7 @@ pub async fn auth_rate_limit(
         return Ok(next.run(req).await);
     }
 
-    let ip = client_ip(&req);
+    let ip = client_ip(&req, state.args.security.trusted_proxy);
     match state.rate_limiter.check_key(&ip) {
         Ok(_) => Ok(next.run(req).await),
         Err(_) => Err(ApiError::TooManyRequests("Too many requests".into())),
@@ -77,7 +80,7 @@ mod tests {
             .header("x-forwarded-for", "203.0.113.7")
             .body(Body::empty())
             .unwrap();
-        assert_eq!(client_ip(&req), "203.0.113.7");
+        assert_eq!(client_ip(&req, true), "203.0.113.7");
     }
 
     #[test]
@@ -86,7 +89,7 @@ mod tests {
             .header("x-forwarded-for", "203.0.113.7, 10.0.0.1")
             .body(Body::empty())
             .unwrap();
-        assert_eq!(client_ip(&req), "203.0.113.7");
+        assert_eq!(client_ip(&req, true), "203.0.113.7");
     }
 
     #[test]
@@ -94,7 +97,21 @@ mod tests {
         let mut req = Request::builder().body(Body::empty()).unwrap();
         let addr: SocketAddr = "198.51.100.4:51234".parse().unwrap();
         req.extensions_mut().insert(ConnectInfo(addr));
-        assert_eq!(client_ip(&req), "198.51.100.4");
+        assert_eq!(client_ip(&req, false), "198.51.100.4");
+    }
+
+    #[test]
+    fn client_ip_ignores_xff_when_untrusted() {
+        let mut req = Request::builder()
+            .header("x-forwarded-for", "203.0.113.7")
+            .body(Body::empty())
+            .unwrap();
+        let addr: SocketAddr = "198.51.100.4:4444".parse().unwrap();
+        req.extensions_mut().insert(ConnectInfo(addr));
+        // trust=false -> XFF ignored, peer used
+        assert_eq!(client_ip(&req, false), "198.51.100.4");
+        // trust=true -> XFF honored
+        assert_eq!(client_ip(&req, true), "203.0.113.7");
     }
 
     #[test]
