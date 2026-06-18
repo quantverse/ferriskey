@@ -34,6 +34,9 @@ pub struct RegistrationRequest {
 
     pub first_name: Option<String>,
     pub last_name: Option<String>,
+
+    #[serde(default)]
+    pub captcha_token: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -100,6 +103,8 @@ pub async fn registration_handler(
     if !settings.user_registration_enabled {
         return Err(ApiError::Forbidden("registration disabled".into()));
     }
+
+    state.captcha.verify(req.captcha_token.as_deref()).await?;
 
     let session_code = cookie
         .get("FERRISKEY_SESSION")
