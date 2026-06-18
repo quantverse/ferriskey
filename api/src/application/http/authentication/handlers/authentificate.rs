@@ -137,7 +137,10 @@ pub async fn authenticate(
 
     // CAPTCHA must pass before any credential work. No-op verifier when disabled.
     if is_credentials_path {
-        state.captcha.verify(payload.captcha_token.as_deref()).await?;
+        state
+            .captcha
+            .verify(payload.captcha_token.as_deref())
+            .await?;
     }
 
     let authenticate_params = if let Some(token) = optional_token {
@@ -176,18 +179,14 @@ pub async fn authenticate(
 
     let result = match state.service.authenticate(authenticate_params).await {
         Ok(result) => {
-            if is_credentials_path {
-                if let Some(username) = payload.username.as_deref() {
-                    state.brute_force.record_success(&realm_name, username);
-                }
+            if is_credentials_path && let Some(username) = payload.username.as_deref() {
+                state.brute_force.record_success(&realm_name, username);
             }
             result
         }
         Err(e) => {
-            if is_credentials_path {
-                if let Some(username) = payload.username.as_deref() {
-                    state.brute_force.record_failure(&realm_name, username);
-                }
+            if is_credentials_path && let Some(username) = payload.username.as_deref() {
+                state.brute_force.record_failure(&realm_name, username);
             }
             return Err(e.into());
         }

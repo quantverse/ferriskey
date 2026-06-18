@@ -4,8 +4,8 @@ use std::time::Duration;
 use ferriskey_core::ApplicationService;
 
 use crate::application::security::brute_force::{BruteForceGuard, InMemoryBruteForceGuard};
-use crate::application::security::captcha::{build_captcha_verifier, CaptchaVerifier};
-use crate::application::security::rate_limit::{build_rate_limiter, KeyedRateLimiter};
+use crate::application::security::captcha::{CaptchaVerifier, build_captcha_verifier};
+use crate::application::security::rate_limit::{KeyedRateLimiter, build_rate_limiter};
 use crate::args::Args;
 
 #[derive(Clone)]

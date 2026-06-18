@@ -29,9 +29,7 @@ use super::handlers::{
 use ferriskey_core::domain::authentication::value_objects::CodeChallengeMethod;
 
 use crate::application::{
-    auth::auth,
-    http::server::app_state::AppState,
-    security::rate_limit::auth_rate_limit,
+    auth::auth, http::server::app_state::AppState, security::rate_limit::auth_rate_limit,
 };
 
 #[derive(OpenApi)]
@@ -90,7 +88,10 @@ pub fn authentication_routes(state: AppState, root_path: &str) -> Router<AppStat
             &format!("{root_path}/realms/{{realm_name}}/protocol/openid-connect/auth"),
             get(auth_handler),
         )
-        .layer(middleware::from_fn_with_state(state.clone(), auth_rate_limit));
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_rate_limit,
+        ));
 
     // Userinfo keeps the existing auth middleware; everything else is unrestricted.
     let rest = Router::new()
