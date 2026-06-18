@@ -83,30 +83,49 @@ impl CaptchaVerifier for CapCaptchaVerifier {
             _ => return Err(CaptchaError::Missing),
         };
 
-        let body = SiteverifyBody { secret: &self.secret, response: token };
+        let body = SiteverifyBody {
+            secret: &self.secret,
+            response: token,
+        };
 
         let response = match self.client.post(self.endpoint()).json(&body).send().await {
             Ok(r) => r,
             Err(e) => {
                 warn!(error = %e, "Cap siteverify request failed");
-                return if self.fail_open { Ok(()) } else { Err(CaptchaError::Unavailable) };
+                return if self.fail_open {
+                    Ok(())
+                } else {
+                    Err(CaptchaError::Unavailable)
+                };
             }
         };
 
         if !response.status().is_success() {
             warn!(status = %response.status(), "Cap siteverify non-success status");
-            return if self.fail_open { Ok(()) } else { Err(CaptchaError::Unavailable) };
+            return if self.fail_open {
+                Ok(())
+            } else {
+                Err(CaptchaError::Unavailable)
+            };
         }
 
         let parsed: serde_json::Value = match response.json().await {
             Ok(v) => v,
             Err(e) => {
                 warn!(error = %e, "Cap siteverify body parse failed");
-                return if self.fail_open { Ok(()) } else { Err(CaptchaError::Unavailable) };
+                return if self.fail_open {
+                    Ok(())
+                } else {
+                    Err(CaptchaError::Unavailable)
+                };
             }
         };
 
-        if parsed.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if parsed
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             Ok(())
         } else {
             Err(CaptchaError::Invalid)
@@ -139,7 +158,12 @@ mod tests {
 
     #[tokio::test]
     async fn cap_missing_token_is_missing() {
-        let v = CapCaptchaVerifier::new("http://127.0.0.1:1".into(), "sk".into(), "secret".into(), false);
+        let v = CapCaptchaVerifier::new(
+            "http://127.0.0.1:1".into(),
+            "sk".into(),
+            "secret".into(),
+            false,
+        );
         assert_eq!(v.verify(None).await, Err(CaptchaError::Missing));
         assert_eq!(v.verify(Some("")).await, Err(CaptchaError::Missing));
     }
@@ -147,13 +171,23 @@ mod tests {
     #[tokio::test]
     async fn cap_unreachable_fails_closed() {
         // Port 1 refuses connections -> Unavailable when fail_open=false.
-        let v = CapCaptchaVerifier::new("http://127.0.0.1:1".into(), "sk".into(), "secret".into(), false);
+        let v = CapCaptchaVerifier::new(
+            "http://127.0.0.1:1".into(),
+            "sk".into(),
+            "secret".into(),
+            false,
+        );
         assert_eq!(v.verify(Some("tok")).await, Err(CaptchaError::Unavailable));
     }
 
     #[tokio::test]
     async fn cap_unreachable_fails_open_when_configured() {
-        let v = CapCaptchaVerifier::new("http://127.0.0.1:1".into(), "sk".into(), "secret".into(), true);
+        let v = CapCaptchaVerifier::new(
+            "http://127.0.0.1:1".into(),
+            "sk".into(),
+            "secret".into(),
+            true,
+        );
         assert!(v.verify(Some("tok")).await.is_ok());
     }
 

@@ -15,7 +15,9 @@ mod tests {
     use axum::Router;
     use axum_test::TestServer;
     use ferriskey_api::{
-        application::http::{authentication::router::authentication_routes, server::app_state::AppState},
+        application::http::{
+            authentication::router::authentication_routes, server::app_state::AppState,
+        },
         args::Args,
     };
     use ferriskey_core::{
@@ -31,7 +33,10 @@ mod tests {
         env::var(key).unwrap_or_else(|_| default.to_string())
     }
     fn env_u16_or(key: &str, default: u16) -> u16 {
-        env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+        env::var(key)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
     }
 
     async fn make_server(mutate: impl FnOnce(&mut Args)) -> (TestServer, String) {
@@ -48,23 +53,38 @@ mod tests {
         );
         let admin_pool = sqlx::PgPool::connect(&admin_url).await.expect("admin pool");
         admin_pool
-            .execute(sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", schema)))
+            .execute(sqlx::query(&format!(
+                "CREATE SCHEMA IF NOT EXISTS \"{}\"",
+                schema
+            )))
             .await
             .expect("create schema");
 
         let schema_url = format!(
             "postgres://{}:{}@{}:{}/{}?options=-c search_path={}",
-            db_user, db_password, db_host, db_port, db_name,
+            db_user,
+            db_password,
+            db_host,
+            db_port,
+            db_name,
             urlencoding::encode(&schema)
         );
-        let pool = sqlx::PgPool::connect(&schema_url).await.expect("schema pool");
-        sqlx::migrate!("../core/migrations").run(&pool).await.expect("migrate");
+        let pool = sqlx::PgPool::connect(&schema_url)
+            .await
+            .expect("schema pool");
+        sqlx::migrate!("../core/migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
 
         let service = create_service(FerriskeyConfig {
             database: DatabaseConfig {
-                host: db_host, port: db_port,
-                username: db_user, password: db_password,
-                name: db_name, schema: schema.clone(),
+                host: db_host,
+                port: db_port,
+                username: db_user,
+                password: db_password,
+                name: db_name,
+                schema: schema.clone(),
             },
         })
         .await
@@ -279,7 +299,10 @@ mod tests {
         // Public client (no client_secret) + password grant + no captcha token
         // -> 400 "captcha token required", before any credential check.
         let resp = server
-            .post(&format!("/realms/{}/protocol/openid-connect/token", realm_name))
+            .post(&format!(
+                "/realms/{}/protocol/openid-connect/token",
+                realm_name
+            ))
             .form(&[
                 ("grant_type", "password"),
                 ("client_id", "admin-cli"),
@@ -290,8 +313,14 @@ mod tests {
 
         let status = resp.status_code();
         let body = resp.text();
-        assert_eq!(status, 400, "missing captcha on public ROPC should be 400, body: {body}");
-        assert!(body.contains("captcha token required"), "expected captcha-required message, body: {body}");
+        assert_eq!(
+            status, 400,
+            "missing captcha on public ROPC should be 400, body: {body}"
+        );
+        assert!(
+            body.contains("captcha token required"),
+            "expected captcha-required message, body: {body}"
+        );
     }
 
     #[tokio::test]
@@ -312,7 +341,10 @@ mod tests {
         // and must NOT be blocked by the captcha (it will fail auth for other
         // reasons, but never with the captcha 400 "captcha token required").
         let resp = server
-            .post(&format!("/realms/{}/protocol/openid-connect/token", realm_name))
+            .post(&format!(
+                "/realms/{}/protocol/openid-connect/token",
+                realm_name
+            ))
             .form(&[
                 ("grant_type", "client_credentials"),
                 ("client_id", "admin-cli"),

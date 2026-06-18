@@ -366,17 +366,41 @@ impl Default for ObservabilityArgs {
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct SecurityArgs {
-    #[arg(long = "rate-limit-enabled", env = "RATE_LIMIT_ENABLED", default_value_t = true)]
+    #[arg(
+        long = "rate-limit-enabled",
+        env = "RATE_LIMIT_ENABLED",
+        default_value_t = true
+    )]
     pub rate_limit_enabled: bool,
-    #[arg(long = "auth-rate-limit-per-min", env = "AUTH_RATE_LIMIT_PER_MIN", default_value_t = 20)]
+    #[arg(
+        long = "auth-rate-limit-per-min",
+        env = "AUTH_RATE_LIMIT_PER_MIN",
+        default_value_t = 20
+    )]
     pub auth_rate_limit_per_min: u32,
-    #[arg(long = "auth-rate-limit-burst", env = "AUTH_RATE_LIMIT_BURST", default_value_t = 5)]
+    #[arg(
+        long = "auth-rate-limit-burst",
+        env = "AUTH_RATE_LIMIT_BURST",
+        default_value_t = 5
+    )]
     pub auth_rate_limit_burst: u32,
-    #[arg(long = "login-max-failures", env = "LOGIN_MAX_FAILURES", default_value_t = 5)]
+    #[arg(
+        long = "login-max-failures",
+        env = "LOGIN_MAX_FAILURES",
+        default_value_t = 5
+    )]
     pub login_max_failures: u32,
-    #[arg(long = "login-failure-window-secs", env = "LOGIN_FAILURE_WINDOW_SECS", default_value_t = 300)]
+    #[arg(
+        long = "login-failure-window-secs",
+        env = "LOGIN_FAILURE_WINDOW_SECS",
+        default_value_t = 300
+    )]
     pub login_failure_window_secs: u64,
-    #[arg(long = "login-throttle-secs", env = "LOGIN_THROTTLE_SECS", default_value_t = 300)]
+    #[arg(
+        long = "login-throttle-secs",
+        env = "LOGIN_THROTTLE_SECS",
+        default_value_t = 300
+    )]
     pub login_throttle_secs: u64,
     #[arg(long = "cap-enabled", env = "CAP_ENABLED", default_value_t = false)]
     pub cap_enabled: bool,

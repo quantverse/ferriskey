@@ -27,14 +27,13 @@ pub fn build_rate_limiter(per_min: u32, burst: u32) -> Arc<KeyedRateLimiter> {
 /// header is absent (API hit directly, e.g. tests), fall back to the socket
 /// peer address from `ConnectInfo`.
 pub fn client_ip(req: &Request) -> String {
-    if let Some(xff) = req.headers().get("x-forwarded-for") {
-        if let Ok(value) = xff.to_str() {
-            if let Some(first) = value.split(',').next() {
-                let ip = first.trim();
-                if !ip.is_empty() {
-                    return ip.to_string();
-                }
-            }
+    if let Some(xff) = req.headers().get("x-forwarded-for")
+        && let Ok(value) = xff.to_str()
+        && let Some(first) = value.split(',').next()
+    {
+        let ip = first.trim();
+        if !ip.is_empty() {
+            return ip.to_string();
         }
     }
 
