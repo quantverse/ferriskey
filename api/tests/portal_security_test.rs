@@ -16,7 +16,9 @@ mod tests {
     use axum_test::TestServer;
     use ferriskey_api::{
         application::http::{
-            authentication::router::authentication_routes, server::app_state::AppState,
+            authentication::router::authentication_routes,
+            server::app_state::AppState,
+            trident::router::trident_routes,
         },
         args::Args,
     };
@@ -110,6 +112,7 @@ mod tests {
         // when more than one test in this binary calls `router()`.
         let app = Router::new()
             .merge(authentication_routes(state.clone(), ""))
+            .merge(trident_routes(state.clone()))
             .layer(axum_cookie::prelude::CookieLayer::default())
             .with_state(state);
         let server = TestServer::new(app).expect("server");
@@ -321,6 +324,32 @@ mod tests {
             body.contains("captcha token required"),
             "expected captcha-required message, body: {body}"
         );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn trident_forgot_password_rate_limited_after_burst() {
+        let (server, realm_name) = make_server(|args| {
+            args.security.rate_limit_enabled = true;
+            args.security.auth_rate_limit_per_min = 1;
+            args.security.auth_rate_limit_burst = 3;
+            args.security.cap_enabled = false;
+        })
+        .await;
+
+        let path = format!("/realms/{}/login-actions/forgot-password", realm_name);
+        let mut saw_429 = false;
+        for _ in 0..10 {
+            let resp = server
+                .post(&path)
+                .json(&serde_json::json!({ "email": "x@y.z" }))
+                .await;
+            if resp.status_code() == 429 {
+                saw_429 = true;
+                break;
+            }
+        }
+        assert!(saw_429, "expected 429 on trident forgot-password after burst");
     }
 
     #[tokio::test]
