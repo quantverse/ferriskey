@@ -1949,3 +1949,193 @@ git commit -m "chore(security): fmt, clippy, and OpenAPI client regen for captch
 - **Deviation from the spec (component location):** the spec placed `CaptchaVerifier`/`BruteForceGuard` as ports in `core`. This plan puts them in the `ferriskey-api` crate because they are transport concerns that need request headers/IP and avoid invasive changes to core's DI (`create_service`). The trait boundary is preserved, so a KeyDB-backed `BruteForceGuard` remains a drop-in later.
 - **Branch:** do this work on a feature branch (e.g. `feat/portal-auth-rate-limit-captcha`), not `main`.
 - **`axum-test` header API:** if `add_header("Cookie", cookie.parse().unwrap())` does not compile against the pinned `axum-test`, use the `(HeaderName, HeaderValue)` form or the string-pair form supported by your version — both exist across versions; pick the one that compiles.
+
+---
+
+# ADDENDUM (post-final-review): close C1 + I1
+
+The final whole-branch review found that abuse controls stopped at the `authentication` router and missed the **`trident`** MFA/reset endpoints (C1), and that the per-IP limiter trusts `X-Forwarded-For` with no fail-safe (I1). User approved: full C1 fix + `TRUSTED_PROXY` fail-safe flag. Tasks 12-14 below. Same Global Constraints apply. All commits must use SPECIFIC `git add` (never `-A`/`.`) because unrelated user WIP is present in the working tree (Dockerfile, docker-compose.yaml, nginx.conf, "docker-compose copy.yaml") — do NOT stage or commit those.
+
+## Task 12: `TRUSTED_PROXY` fail-safe for IP keying (I1)
+
+**Files:**
+- Modify: `api/src/args.rs` (add field to `SecurityArgs`)
+- Modify: `api/src/application/security/rate_limit.rs` (`client_ip` takes the flag; middleware passes it; tests)
+- Modify: `api/env.example`, `front/nginx.conf` (doc)
+
+**Interfaces:**
+- Produces: `SecurityArgs.trusted_proxy: bool` (env `TRUSTED_PROXY`, default `false`); `client_ip(req, trust_forwarded_for: bool)`.
+
+- [ ] **Step 1: Add the config field.** In `api/src/args.rs` `SecurityArgs`, add (after `rate_limit_enabled`):
+```rust
+    #[arg(long = "trusted-proxy", env = "TRUSTED_PROXY", default_value_t = false)]
+    pub trusted_proxy: bool,
+```
+And in `impl Default for SecurityArgs` add `trusted_proxy: false,`.
+
+- [ ] **Step 2: Make `client_ip` honor the flag.** In `api/src/application/security/rate_limit.rs`, change the signature to `pub fn client_ip(req: &Request, trust_forwarded_for: bool) -> String` and only consult `X-Forwarded-For` when `trust_forwarded_for` is true:
+```rust
+pub fn client_ip(req: &Request, trust_forwarded_for: bool) -> String {
+    if trust_forwarded_for {
+        if let Some(xff) = req.headers().get("x-forwarded-for") {
+            if let Ok(value) = xff.to_str() {
+                if let Some(first) = value.split(',').next() {
+                    let ip = first.trim();
+                    if !ip.is_empty() {
+                        return ip.to_string();
+                    }
+                }
+            }
+        }
+    }
+    if let Some(ConnectInfo(addr)) = req.extensions().get::<ConnectInfo<SocketAddr>>() {
+        return addr.ip().to_string();
+    }
+    "unknown".to_string()
+}
+```
+(clippy may collapse the nested ifs into let-chains — that is fine; run `cargo clippy -p ferriskey-api -- -D warnings` and apply.)
+
+- [ ] **Step 3: Pass the flag from the middleware.** In `auth_rate_limit`, change `let ip = client_ip(&req);` to `let ip = client_ip(&req, state.args.security.trusted_proxy);`.
+
+- [ ] **Step 4: Update + add tests.** The three existing `client_ip` tests must pass `true` for the XFF cases and `true`/`false` for the peer case. Update them and add one new test:
+```rust
+    #[test]
+    fn client_ip_ignores_xff_when_untrusted() {
+        let mut req = Request::builder()
+            .header("x-forwarded-for", "203.0.113.7")
+            .body(Body::empty())
+            .unwrap();
+        let addr: SocketAddr = "198.51.100.4:4444".parse().unwrap();
+        req.extensions_mut().insert(ConnectInfo(addr));
+        // trust=false -> XFF ignored, peer used
+        assert_eq!(client_ip(&req, false), "198.51.100.4");
+        // trust=true -> XFF honored
+        assert_eq!(client_ip(&req, true), "203.0.113.7");
+    }
+```
+Update `client_ip_prefers_xff` and `client_ip_takes_leftmost_xff` to call `client_ip(&req, true)`, and `client_ip_falls_back_to_peer` to `client_ip(&req, false)` (peer regardless).
+
+- [ ] **Step 5: Document.** In `api/env.example`, under the rate-limiting block add:
+```bash
+# Trust X-Forwarded-For for per-IP rate limiting. Set true ONLY when the API
+# sits behind a reverse proxy that OVERWRITES XForwardedFor with the real
+# client address. When false (default), the limiter keys on the socket peer IP
+# (fail-safe: a misconfigured/no-proxy deploy cannot be bypassed via a spoofed
+# XForwardedFor header).
+TRUSTED_PROXY=false
+```
+In `front/nginx.conf`, extend the existing SECURITY comment to note: the API must run with `TRUSTED_PROXY=true` only when its fronting proxy overwrites `X-Forwarded-For` with `$remote_addr`.
+
+- [ ] **Step 6:** `cargo fmt -p ferriskey-api`; `cargo clippy -p ferriskey-api -- -D warnings`; `cargo test -p ferriskey-api --lib security::rate_limit` (all pass). Commit:
+```bash
+git add api/src/args.rs api/src/application/security/rate_limit.rs api/env.example front/nginx.conf
+git commit -m "feat(security): TRUSTED_PROXY fail-safe for X-Forwarded-For IP keying"
+```
+
+## Task 13: per-IP rate limit on trident MFA/reset routes (C1a)
+
+**Files:**
+- Modify: `api/src/application/http/trident/router.rs`
+- Modify: `api/tests/portal_security_test.rs`
+
+- [ ] **Step 1: Layer the limiter on the trident router.** In `api/src/application/http/trident/router.rs`, add the import `use crate::application::security::rate_limit::auth_rate_limit;` and apply the layer to the merged router (it covers all trident login-actions routes — public, login-action-token, and bearer):
+```rust
+    public_routes
+        .merge(login_action_routes)
+        .merge(bearer_protected_routes)
+        .layer(middleware::from_fn_with_state(state.clone(), auth_rate_limit))
+```
+
+- [ ] **Step 2: Extend the test harness to mount trident routes.** In `api/tests/portal_security_test.rs`, import `trident_routes` (`use ferriskey_api::application::http::trident::router::trident_routes;` — verify the exact path) and in `make_server` merge it into the router:
+```rust
+        let app = Router::new()
+            .merge(authentication_routes(state.clone(), ""))
+            .merge(trident_routes(state.clone()))
+            .layer(axum_cookie::prelude::CookieLayer::default())
+            .with_state(state);
+```
+
+- [ ] **Step 3: Add the failing test.** A public trident route (`forgot-password`) is the easiest to flood (no auth needed). Assert a 429 appears after the burst:
+```rust
+    #[tokio::test]
+    #[ignore]
+    async fn trident_forgot_password_rate_limited_after_burst() {
+        let (server, realm_name) = make_server(|args| {
+            args.security.rate_limit_enabled = true;
+            args.security.auth_rate_limit_per_min = 1;
+            args.security.auth_rate_limit_burst = 3;
+            args.security.cap_enabled = false;
+        })
+        .await;
+
+        let path = format!("/realms/{}/login-actions/forgot-password", realm_name);
+        let mut saw_429 = false;
+        for _ in 0..10 {
+            let resp = server.post(&path).json(&serde_json::json!({ "email": "x@y.z" })).await;
+            if resp.status_code() == 429 {
+                saw_429 = true;
+                break;
+            }
+        }
+        assert!(saw_429, "expected 429 on trident forgot-password after burst");
+    }
+```
+(If `forgot-password`'s body schema differs, send whatever minimal JSON it accepts — the rate limiter fires before the handler regardless; if the handler needs no body, drop `.json(...)`.)
+
+- [ ] **Step 4:** `cargo test -p ferriskey-api --test portal_security_test -- --ignored` (all pass, incl. the new one). Commit:
+```bash
+git add api/src/application/http/trident/router.rs api/tests/portal_security_test.rs
+git commit -m "feat(security): per-IP rate limit on trident MFA/reset login-actions routes"
+```
+
+## Task 14: per-account OTP + recovery-code throttle (C1b)
+
+**Files:**
+- Modify: `api/src/application/http/trident/handlers/challenge_otp.rs`
+- Modify: `api/src/application/http/trident/handlers/burn_recovery_code.rs`
+
+**Context:** `Identity` (from `ferriskey_core::domain::authentication::value_objects::Identity`) exposes `.id() -> Uuid` (user id) and `.realm_id() -> RealmId` (Display-able). Reuse the existing `state.brute_force` guard with a namespaced key so OTP/recovery attempts don't collide with login counters.
+
+- [ ] **Step 1: Throttle `challenge_otp`.** In `challenge_otp.rs`, after the session cookie is read and before calling `state.service.challenge_otp(...)`, add the pre-check, then convert the service call to a match that records the outcome:
+```rust
+    let bf_realm = identity.realm_id().to_string();
+    let bf_key = format!("otp:{}", identity.id());
+
+    if state.brute_force.check(&bf_realm, &bf_key) {
+        return Err(ApiError::TooManyRequests(
+            "too many incorrect codes, try again later".into(),
+        ));
+    }
+
+    let result = match state
+        .service
+        .challenge_otp(
+            identity,
+            ChallengeOtpInput { code: payload.code, session_code },
+        )
+        .await
+    {
+        Ok(result) => {
+            state.brute_force.record_success(&bf_realm, &bf_key);
+            result
+        }
+        Err(e) => {
+            state.brute_force.record_failure(&bf_realm, &bf_key);
+            return Err(ApiError::InternalServerError(e.to_string().into()));
+        }
+    };
+```
+(`identity` is moved into `challenge_otp`; compute `bf_realm`/`bf_key` BEFORE the call. Keep the rest of the handler — building `ChallengeOtpResponse` from `result` — unchanged.)
+
+- [ ] **Step 2: Throttle `burn_recovery_code`.** Apply the same pattern in `burn_recovery_code.rs` with key `format!("recovery:{}", identity.id())`. Read the handler first; compute `bf_realm`/`bf_key` from `identity` before it is moved into the service call; pre-check → `ApiError::TooManyRequests`; record failure on the `Err` arm, success on the `Ok` arm; preserve the existing response mapping and error status.
+
+- [ ] **Step 3: Verify.** `cargo fmt -p ferriskey-api`; `cargo clippy -p ferriskey-api -- -D warnings`; `cargo test -p ferriskey-api --lib` (38+ pass) and `cargo test -p ferriskey-api --test portal_security_test -- --ignored` (all pass — no regressions).
+
+  **Test-coverage note (record in the report, do not skip):** a full integration test of the OTP throttle requires a complete MFA enrollment + first-factor flow to obtain a valid login-action `Identity`, which the minimal test harness cannot set up. The throttle MECHANISM is already unit-tested in `security::brute_force`; the handler WIRING here mirrors the login path (Task 6) and is verified by code inspection + clippy/compile. Flag this as a known integration-test gap for the final reviewer.
+
+- [ ] **Step 4: Commit.**
+```bash
+git add api/src/application/http/trident/handlers/challenge_otp.rs api/src/application/http/trident/handlers/burn_recovery_code.rs
+git commit -m "feat(security): per-account throttle on OTP challenge + recovery-code burn"
+```
