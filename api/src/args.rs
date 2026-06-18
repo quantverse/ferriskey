@@ -72,6 +72,8 @@ pub struct Args {
     pub webapp_url: String,
     #[command(flatten)]
     pub observability: ObservabilityArgs,
+    #[command(flatten)]
+    pub security: SecurityArgs,
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -86,6 +88,7 @@ impl Default for Args {
             server: ServerArgs::default(),
             webapp_url: "http://localhost:5555".to_string(),
             observability: ObservabilityArgs::default(),
+            security: SecurityArgs::default(),
             command: None,
         }
     }
@@ -361,6 +364,50 @@ impl Default for ObservabilityArgs {
     }
 }
 
+#[derive(clap::Args, Debug, Clone)]
+pub struct SecurityArgs {
+    #[arg(long = "rate-limit-enabled", env = "RATE_LIMIT_ENABLED", default_value_t = true)]
+    pub rate_limit_enabled: bool,
+    #[arg(long = "auth-rate-limit-per-min", env = "AUTH_RATE_LIMIT_PER_MIN", default_value_t = 20)]
+    pub auth_rate_limit_per_min: u32,
+    #[arg(long = "auth-rate-limit-burst", env = "AUTH_RATE_LIMIT_BURST", default_value_t = 5)]
+    pub auth_rate_limit_burst: u32,
+    #[arg(long = "login-max-failures", env = "LOGIN_MAX_FAILURES", default_value_t = 5)]
+    pub login_max_failures: u32,
+    #[arg(long = "login-failure-window-secs", env = "LOGIN_FAILURE_WINDOW_SECS", default_value_t = 300)]
+    pub login_failure_window_secs: u64,
+    #[arg(long = "login-throttle-secs", env = "LOGIN_THROTTLE_SECS", default_value_t = 300)]
+    pub login_throttle_secs: u64,
+    #[arg(long = "cap-enabled", env = "CAP_ENABLED", default_value_t = false)]
+    pub cap_enabled: bool,
+    #[arg(long = "cap-verify-url", env = "CAP_VERIFY_URL", default_value = "")]
+    pub cap_verify_url: String,
+    #[arg(long = "cap-site-key", env = "CAP_SITE_KEY", default_value = "")]
+    pub cap_site_key: String,
+    #[arg(long = "cap-secret", env = "CAP_SECRET", default_value = "")]
+    pub cap_secret: String,
+    #[arg(long = "cap-fail-open", env = "CAP_FAIL_OPEN", default_value_t = false)]
+    pub cap_fail_open: bool,
+}
+
+impl Default for SecurityArgs {
+    fn default() -> Self {
+        Self {
+            rate_limit_enabled: true,
+            auth_rate_limit_per_min: 20,
+            auth_rate_limit_burst: 5,
+            login_max_failures: 5,
+            login_failure_window_secs: 300,
+            login_throttle_secs: 300,
+            cap_enabled: false,
+            cap_verify_url: String::new(),
+            cap_site_key: String::new(),
+            cap_secret: String::new(),
+            cap_fail_open: false,
+        }
+    }
+}
+
 fn parse_root_path(value: &str) -> Result<String, String> {
     let value = value.trim_end_matches('/');
     if value.is_empty() || value.starts_with('/') {
@@ -427,5 +474,15 @@ mod test {
             let path = parse_root_path("/api/").unwrap();
             assert_eq!(path, "/api");
         }
+    }
+
+    #[test]
+    fn security_defaults() {
+        let s = super::SecurityArgs::default();
+        assert!(s.rate_limit_enabled);
+        assert_eq!(s.auth_rate_limit_per_min, 20);
+        assert_eq!(s.login_max_failures, 5);
+        assert!(!s.cap_enabled);
+        assert!(!s.cap_fail_open);
     }
 }
