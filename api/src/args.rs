@@ -412,6 +412,8 @@ pub struct SecurityArgs {
     pub cap_secret: String,
     #[arg(long = "cap-fail-open", env = "CAP_FAIL_OPEN", default_value_t = false)]
     pub cap_fail_open: bool,
+    #[arg(long = "trusted-proxy", env = "TRUSTED_PROXY", default_value_t = false)]
+    pub trusted_proxy: bool,
 }
 
 impl Default for SecurityArgs {
@@ -428,6 +430,7 @@ impl Default for SecurityArgs {
             cap_site_key: String::new(),
             cap_secret: String::new(),
             cap_fail_open: false,
+            trusted_proxy: false,
         }
     }
 }
