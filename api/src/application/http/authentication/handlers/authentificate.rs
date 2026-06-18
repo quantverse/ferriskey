@@ -51,6 +51,9 @@ pub struct AuthenticateRequest {
     #[validate(length(min = 1, message = "password is required"))]
     #[serde(default)]
     pub password: Option<String>,
+
+    #[serde(default)]
+    pub captcha_token: Option<String>,
 }
 
 impl From<AuthenticateOutput> for AuthenticateResponse {
@@ -129,6 +132,14 @@ pub async fn authenticate(
 
     let base_url = root_scoped_base_url(&base_url, &state.args.server.root_path);
 
+    // Remember whether we are on the credentials path before optional_token is moved.
+    let is_credentials_path = optional_token.is_none();
+
+    // CAPTCHA must pass before any credential work. No-op verifier when disabled.
+    if is_credentials_path {
+        state.captcha.verify(payload.captcha_token.as_deref()).await?;
+    }
+
     let authenticate_params = if let Some(token) = optional_token {
         AuthenticateInput::with_existing_token(
             realm_name.clone(),
@@ -147,6 +158,12 @@ pub async fn authenticate(
             .clone()
             .ok_or_else(|| ApiError::BadRequest("password is required".into()))?;
 
+        if state.brute_force.check(&realm_name, &username) {
+            return Err(ApiError::TooManyRequests(
+                "too many failed login attempts, try again later".into(),
+            ));
+        }
+
         AuthenticateInput::with_user_credentials(
             realm_name.clone(),
             query.client_id.clone(),
@@ -156,7 +173,25 @@ pub async fn authenticate(
             password,
         )
     };
-    let result = state.service.authenticate(authenticate_params).await?;
+
+    let result = match state.service.authenticate(authenticate_params).await {
+        Ok(result) => {
+            if is_credentials_path {
+                if let Some(username) = payload.username.as_deref() {
+                    state.brute_force.record_success(&realm_name, username);
+                }
+            }
+            result
+        }
+        Err(e) => {
+            if is_credentials_path {
+                if let Some(username) = payload.username.as_deref() {
+                    state.brute_force.record_failure(&realm_name, username);
+                }
+            }
+            return Err(e.into());
+        }
+    };
 
     // If user has VerifyEmail required action, automatically send verification email
     if result.status == AuthenticationStepStatus::RequiresActions
