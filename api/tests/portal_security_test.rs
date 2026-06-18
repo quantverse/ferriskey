@@ -133,6 +133,9 @@ mod tests {
         let (server, realm_name) = make_server(|args| {
             args.security.rate_limit_enabled = false;
             args.security.cap_enabled = false;
+            // Raise the brute-force ceiling so 8 bad-password attempts don't
+            // trigger the per-account throttle before the rate-limit assertion.
+            args.security.login_max_failures = 100;
         })
         .await;
 
@@ -257,6 +260,66 @@ mod tests {
             "expected 400 (captcha) or 403 (registration disabled), got {} body {}",
             resp.status_code(),
             resp.text()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn public_password_grant_requires_captcha_when_enabled() {
+        let (server, realm_name) = make_server(|args| {
+            args.security.rate_limit_enabled = false;
+            args.security.cap_enabled = true;
+            args.security.cap_verify_url = "http://127.0.0.1:1".to_string();
+            args.security.cap_site_key = "sk".to_string();
+            args.security.cap_secret = "secret".to_string();
+            args.security.cap_fail_open = false;
+        })
+        .await;
+
+        // Public client (no client_secret) + password grant + no captcha token
+        // -> 400 "captcha token required", before any credential check.
+        let resp = server
+            .post(&format!("/realms/{}/protocol/openid-connect/token", realm_name))
+            .form(&[
+                ("grant_type", "password"),
+                ("client_id", "admin-cli"),
+                ("username", "admin"),
+                ("password", "admin"),
+            ])
+            .await;
+
+        assert_eq!(resp.status_code(), 400, "missing captcha on public ROPC should be 400, body: {}", resp.text());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn confidential_grants_exempt_from_captcha() {
+        let (server, realm_name) = make_server(|args| {
+            args.security.rate_limit_enabled = false;
+            args.security.cap_enabled = true;
+            args.security.cap_verify_url = "http://127.0.0.1:1".to_string();
+            args.security.cap_site_key = "sk".to_string();
+            args.security.cap_secret = "secret".to_string();
+            args.security.cap_fail_open = false;
+        })
+        .await;
+
+        // client_credentials grant carries no username/password and is exempt;
+        // it must NOT be blocked by the captcha (it will fail auth for other
+        // reasons, but never with the captcha 400 "captcha token required").
+        let resp = server
+            .post(&format!("/realms/{}/protocol/openid-connect/token", realm_name))
+            .form(&[
+                ("grant_type", "client_credentials"),
+                ("client_id", "admin-cli"),
+            ])
+            .await;
+
+        // Whatever happens, it is not the captcha-required 400.
+        let body = resp.text();
+        assert!(
+            !body.contains("captcha token required"),
+            "client_credentials must be exempt from captcha, body: {body}"
         );
     }
 }

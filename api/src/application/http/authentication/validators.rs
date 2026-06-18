@@ -36,6 +36,10 @@ pub struct TokenRequestValidator {
     // Used by the device_code grant (RFC 8628 §3.4)
     #[serde(default)]
     pub device_code: Option<String>,
+
+    // Cap captcha token (required for public-client password grants when captcha is enabled)
+    #[serde(default)]
+    pub captcha_token: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, ToSchema)]
