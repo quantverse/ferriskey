@@ -156,6 +156,36 @@ services:
     profiles:
       - standalone-registry
 
+  keydb:
+    image: eqalpha/keydb:latest
+    command: keydb-server --appendonly yes
+    ports:
+      - 6379:6379
+    volumes:
+      - keydbdata:/data
+    healthcheck:
+      test: ["CMD", "keydb-cli", "ping"]
+      interval: 10s
+      retries: 5
+      timeout: 5s
+
+  # NOTE: verify the Cap Standalone image tag against the current Cap release
+  # (https://github.com/tiagorangel1/cap) before deploying to production.
+  # The site key + secret are created in the Cap dashboard (http://localhost:3000,
+  # log in with ADMIN_KEY) and supplied to the API via CAP_SITE_KEY / CAP_SECRET.
+  cap:
+    image: ghcr.io/tiagorangel1/cap:standalone
+    environment:
+      ADMIN_KEY: ${CAP_ADMIN_KEY:-change-me-32-chars-minimum-please}
+      REDIS_URL: redis://keydb:6379
+    ports:
+      - 3000:3000
+    depends_on:
+      keydb:
+        condition: service_healthy
+
 volumes:
   pgdata:
     name: ferriskey_pgdata
+  keydbdata:
+    name: ferriskey_keydbdata
