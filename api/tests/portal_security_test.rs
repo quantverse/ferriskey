@@ -90,6 +90,7 @@ mod tests {
         // when more than one test in this binary calls `router()`.
         let app = Router::new()
             .merge(authentication_routes(state.clone(), ""))
+            .layer(axum_cookie::prelude::CookieLayer::default())
             .with_state(state);
         let server = TestServer::new(app).expect("server");
         (server, realm_name)
@@ -148,5 +149,76 @@ mod tests {
                 .await;
             assert_ne!(resp.status_code(), 429, "rate limiting should be off");
         }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn authenticate_requires_captcha_when_enabled() {
+        let (server, realm_name) = make_server(|args| {
+            args.security.rate_limit_enabled = false;
+            args.security.cap_enabled = true;
+            // Unreachable Cap + fail-closed: a *present* token yields 503, an
+            // *absent* token yields 400 (Missing) before Cap is even contacted.
+            args.security.cap_verify_url = "http://127.0.0.1:1".to_string();
+            args.security.cap_site_key = "sk".to_string();
+            args.security.cap_secret = "secret".to_string();
+            args.security.cap_fail_open = false;
+        })
+        .await;
+
+        // Send a random FERRISKEY_SESSION cookie so execution reaches the captcha
+        // check (without a cookie the handler returns 401 before captcha runs).
+        // The session UUID need not be valid because captcha is verified before
+        // the session is used by the service.
+        let session_cookie = format!("FERRISKEY_SESSION={}", Uuid::new_v4());
+        let resp = server
+            .post(&format!(
+                "/realms/{}/login-actions/authenticate?client_id=admin-cli",
+                realm_name
+            ))
+            .add_header("Cookie", session_cookie.as_str())
+            .json(&serde_json::json!({ "username": "admin", "password": "admin" }))
+            .await;
+
+        assert_eq!(
+            resp.status_code(),
+            400,
+            "missing captcha should be a 400, body: {}",
+            resp.text()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn brute_force_throttles_after_failures() {
+        let (server, realm_name) = make_server(|args| {
+            args.security.rate_limit_enabled = false;
+            args.security.cap_enabled = false;
+            args.security.login_max_failures = 3;
+            args.security.login_failure_window_secs = 300;
+            args.security.login_throttle_secs = 300;
+        })
+        .await;
+
+        let path = format!(
+            "/realms/{}/login-actions/authenticate?client_id=admin-cli",
+            realm_name
+        );
+        let session_cookie = format!("FERRISKEY_SESSION={}", Uuid::new_v4());
+        let body = serde_json::json!({ "username": "admin", "password": "definitely-wrong" });
+
+        let mut saw_429 = false;
+        for _ in 0..6 {
+            let resp = server
+                .post(&path)
+                .add_header("Cookie", session_cookie.as_str())
+                .json(&body)
+                .await;
+            if resp.status_code() == 429 {
+                saw_429 = true;
+                break;
+            }
+        }
+        assert!(saw_429, "expected 429 after repeated failed logins");
     }
 }
