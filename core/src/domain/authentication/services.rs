@@ -54,7 +54,7 @@ use crate::domain::{
     realm::{entities::RealmId, ports::RealmRepository},
     seawatch::{EventStatus, SecurityEvent, SecurityEventRepository, SecurityEventType},
     user::{
-        entities::{RequiredAction, UserAttribute},
+        entities::{RequiredAction, User, UserAttribute},
         ports::{
             UserAttributeRepository, UserRepository, UserRequiredActionRepository,
             UserRoleRepository,
@@ -70,6 +70,33 @@ use ferriskey_domain::token_lifetime::TokenLifetimes;
 use ferriskey_security::jwt::entities::DEFAULT_ACCESS_TOKEN_LIFETIME;
 
 use crate::infrastructure::abyss::federation::ldap::LdapClientImpl;
+
+/// Resolve the user signing in, accepting either a username or an email.
+///
+/// Authentication is keyed on username, but the portal login field accepts
+/// "username or email" and accounts frequently have a username that differs
+/// from their email (the portal register flow derives the username from the
+/// email's local-part). When the username lookup misses we retry by email so
+/// either identifier signs in. Returns `UserNotFound` when neither matches.
+async fn resolve_login_user<U: UserRepository>(
+    user_repository: &U,
+    identifier: &str,
+    realm_id: RealmId,
+) -> Result<User, CoreError> {
+    if let Ok(user) = user_repository
+        .get_by_username(identifier.to_string(), realm_id)
+        .await
+    {
+        return Ok(user);
+    }
+
+    user_repository
+        .get_by_email(identifier, realm_id)
+        .await
+        .ok()
+        .flatten()
+        .ok_or(CoreError::UserNotFound)
+}
 
 #[derive(Clone, Debug)]
 pub struct AuthServiceImpl<
@@ -1413,14 +1440,12 @@ where
                 CoreError::InvalidClient
             })?;
 
-        let user = self
-            .user_repository
-            .get_by_username(username.clone(), realm.id)
+        let user = resolve_login_user(self.user_repository.as_ref(), &username, realm.id)
             .await
             .map_err(|e| {
-                warn!("User not found for username {}: {:?}", username, e);
+                warn!("User not found for username or email {}: {:?}", username, e);
 
-                CoreError::UserNotFound
+                e
             })?;
 
         if !user.enabled {
@@ -2718,5 +2743,78 @@ where
             None,
             None,
         ))
+    }
+}
+
+#[cfg(test)]
+mod resolve_login_user_tests {
+    use super::*;
+    use crate::domain::common::services::tests::{
+        create_test_realm_with_name, create_test_user_with_params_and_realm,
+    };
+    use crate::domain::user::ports::MockUserRepository;
+
+    // username "incognite2" with a different email — the exact mismatch that
+    // produced "User not found" when logging in with the email.
+    fn user_and_realm() -> (crate::domain::realm::entities::Realm, User) {
+        let realm = create_test_realm_with_name("test");
+        let user = create_test_user_with_params_and_realm(
+            &realm,
+            "incognite2",
+            "incognite2@centrum.cz".to_string(),
+            true,
+        );
+        (realm, user)
+    }
+
+    #[tokio::test]
+    async fn returns_user_when_username_matches() {
+        let (realm, user) = user_and_realm();
+        let realm_id = realm.id;
+        let expected = user.id;
+
+        let mut repo = MockUserRepository::new();
+        repo.expect_get_by_username()
+            .return_once(move |_, _| Box::pin(async move { Ok(user) }));
+        // Email lookup must not run when the username already resolves.
+        repo.expect_get_by_email().never();
+
+        let result = resolve_login_user(&repo, "incognite2", realm_id)
+            .await
+            .expect("username should resolve");
+        assert_eq!(result.id, expected);
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_email_when_username_missing() {
+        let (realm, user) = user_and_realm();
+        let realm_id = realm.id;
+        let expected = user.id;
+
+        let mut repo = MockUserRepository::new();
+        repo.expect_get_by_username()
+            .return_once(|_, _| Box::pin(async { Err(CoreError::UserNotFound) }));
+        repo.expect_get_by_email()
+            .return_once(move |_, _| Box::pin(async move { Ok(Some(user)) }));
+
+        let result = resolve_login_user(&repo, "incognite2@centrum.cz", realm_id)
+            .await
+            .expect("email fallback should resolve");
+        assert_eq!(result.id, expected);
+    }
+
+    #[tokio::test]
+    async fn errors_when_neither_username_nor_email_matches() {
+        let realm = create_test_realm_with_name("test");
+        let realm_id = realm.id;
+
+        let mut repo = MockUserRepository::new();
+        repo.expect_get_by_username()
+            .return_once(|_, _| Box::pin(async { Err(CoreError::UserNotFound) }));
+        repo.expect_get_by_email()
+            .return_once(|_, _| Box::pin(async { Ok(None) }));
+
+        let result = resolve_login_user(&repo, "nobody@nowhere.test", realm_id).await;
+        assert!(matches!(result, Err(CoreError::UserNotFound)));
     }
 }
