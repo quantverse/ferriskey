@@ -208,6 +208,8 @@ Two sides must be configured: the **backend** (enforcement) and the **frontend**
    docker compose --profile standalone up -d --build
    ```
 
+4. **If you use a custom Portal template** (Portal builder), add the **Captcha** block to your **login** and **register** pages. The built-in (default) login/register pages render the widget automatically, but custom templates do not — the block is only available on those two page types.
+
 > **Note:** on custom Portal-builder templates the captcha is a block — drag the **Captcha** block onto the login and register pages for the widget to appear (it is not inserted automatically). When `CAP_ENABLED=true` and a template omits it, those submissions are rejected with `400 captcha token required`.
 
 ## 🗄️ Database Migrations
