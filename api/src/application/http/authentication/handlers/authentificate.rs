@@ -2,6 +2,7 @@ use super::auth::root_scoped_base_url;
 use crate::application::decoded_token::OptionalToken;
 use crate::application::http::server::api_entities::api_error::{ApiError, ValidateJson};
 use crate::application::http::server::app_state::AppState;
+use crate::application::security::credential_failure::is_credential_rejection;
 use crate::application::url::FullUrl;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -162,9 +163,10 @@ pub async fn authenticate(
             .ok_or_else(|| ApiError::BadRequest("password is required".into()))?;
 
         if state.brute_force.check(&realm_name, &username) {
-            return Err(ApiError::TooManyRequests(
-                "too many failed login attempts, try again later".into(),
-            ));
+            return Err(ApiError::TooManyRequests {
+                message: "too many failed login attempts, try again later".into(),
+                retry_after_secs: state.args.security.login_throttle_secs,
+            });
         }
 
         AuthenticateInput::with_user_credentials(
@@ -185,7 +187,12 @@ pub async fn authenticate(
             result
         }
         Err(e) => {
-            if is_credentials_path && let Some(username) = payload.username.as_deref() {
+            // Only count genuine credential rejections — never infrastructure or
+            // session errors — so an induced 5xx cannot lock out an account.
+            if is_credentials_path
+                && is_credential_rejection(&e)
+                && let Some(username) = payload.username.as_deref()
+            {
                 state.brute_force.record_failure(&realm_name, username);
             }
             return Err(e.into());

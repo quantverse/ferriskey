@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
-use governor::clock::DefaultClock;
+use governor::clock::{Clock, DefaultClock};
 use governor::state::keyed::DashMapStateStore;
 use governor::{Quota, RateLimiter};
 
@@ -64,7 +64,14 @@ pub async fn auth_rate_limit(
     let ip = client_ip(&req, state.args.security.trusted_proxy);
     match state.rate_limiter.check_key(&ip) {
         Ok(_) => Ok(next.run(req).await),
-        Err(_) => Err(ApiError::TooManyRequests("Too many requests".into())),
+        Err(not_until) => {
+            // Advertise the limiter's actual recovery time rather than a fixed value.
+            let wait = not_until.wait_time_from(DefaultClock::default().now());
+            Err(ApiError::TooManyRequests {
+                message: "Too many requests".into(),
+                retry_after_secs: wait.as_secs().max(1),
+            })
+        }
     }
 }
 

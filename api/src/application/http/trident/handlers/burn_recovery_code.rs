@@ -16,6 +16,7 @@ use crate::application::http::server::{
     },
     app_state::AppState,
 };
+use crate::application::security::credential_failure::is_credential_rejection;
 
 #[derive(Debug, Serialize, Deserialize, ToSchema, Validate)]
 pub struct BurnRecoveryCodeRequest {
@@ -65,9 +66,10 @@ pub async fn burn_recovery_code(
     let bf_key = format!("recovery:{}", identity.id());
 
     if state.brute_force.check(&bf_realm, &bf_key) {
-        return Err(ApiError::TooManyRequests(
-            "too many incorrect codes, try again later".into(),
-        ));
+        return Err(ApiError::TooManyRequests {
+            message: "too many incorrect codes, try again later".into(),
+            retry_after_secs: state.args.security.login_throttle_secs,
+        });
     }
 
     let result = match state
@@ -87,7 +89,11 @@ pub async fn burn_recovery_code(
             result
         }
         Err(e) => {
-            state.brute_force.record_failure(&bf_realm, &bf_key);
+            // Only an actual wrong recovery code counts toward the per-account
+            // throttle; infrastructure/session errors must not lock the account out.
+            if is_credential_rejection(&e) {
+                state.brute_force.record_failure(&bf_realm, &bf_key);
+            }
             return Err(ApiError::from(e));
         }
     };

@@ -213,38 +213,48 @@ mod tests {
         );
     }
 
+    /// Finding-1 regression guard (lockout-DoS): repeated NON-credential errors
+    /// must NEVER trip the per-account throttle.
+    ///
+    /// The seeded `admin-cli` is a confidential client, so a password grant sent
+    /// without its secret fails at client authentication (`InvalidClientSecret`)
+    /// — a non-credential error — before any user-password check. Even with a
+    /// low `login_max_failures`, these must not accumulate toward a lockout;
+    /// otherwise an attacker (or a transient outage) could lock out accounts.
+    ///
+    /// The POSITIVE path (a genuine credential rejection DOES throttle) is covered
+    /// by unit tests: `security::credential_failure` (which errors count) and
+    /// `security::brute_force` (throttle/reset/sweep). A full end-to-end positive
+    /// test is impractical here because the default realm seeds no public
+    /// direct-access-grants client, so the minimal harness cannot reach the
+    /// user-password check without provisioning one.
     #[tokio::test]
     #[ignore]
-    async fn brute_force_throttles_after_failures() {
+    async fn non_credential_errors_do_not_throttle() {
         let (server, realm_name) = make_server(|args| {
             args.security.rate_limit_enabled = false;
             args.security.cap_enabled = false;
-            args.security.login_max_failures = 3;
-            args.security.login_failure_window_secs = 300;
-            args.security.login_throttle_secs = 300;
+            args.security.login_max_failures = 3; // would trip quickly IF these counted
         })
         .await;
 
-        let path = format!(
-            "/realms/{}/login-actions/authenticate?client_id=admin-cli",
-            realm_name
-        );
-        let session_cookie = format!("FERRISKEY_SESSION={}", Uuid::new_v4());
-        let body = serde_json::json!({ "username": "admin", "password": "definitely-wrong" });
-
-        let mut saw_429 = false;
-        for _ in 0..6 {
+        let path = format!("/realms/{}/protocol/openid-connect/token", realm_name);
+        for _ in 0..10 {
             let resp = server
                 .post(&path)
-                .add_header("Cookie", session_cookie.as_str())
-                .json(&body)
+                .form(&[
+                    ("grant_type", "password"),
+                    ("client_id", "admin-cli"),
+                    ("username", "admin"),
+                    ("password", "definitely-wrong"),
+                ])
                 .await;
-            if resp.status_code() == 429 {
-                saw_429 = true;
-                break;
-            }
+            assert_ne!(
+                resp.status_code(),
+                429,
+                "non-credential errors must not trip the per-account throttle (lockout-DoS guard)"
+            );
         }
-        assert!(saw_429, "expected 429 after repeated failed logins");
     }
 
     #[tokio::test]

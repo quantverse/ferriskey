@@ -60,8 +60,17 @@ pub struct CapCaptchaVerifier {
 
 impl CapCaptchaVerifier {
     pub fn new(verify_url: String, site_key: String, secret: String, fail_open: bool) -> Self {
+        // Cap sits on the pre-credential hot path, so a slow/hung Cap service must
+        // not stall every login. Bound the request with a total + connect timeout;
+        // a timeout surfaces as a reqwest error, handled by the fail-open/closed logic.
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .connect_timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
         Self {
-            client: reqwest::Client::new(),
+            client,
             verify_url: verify_url.trim_end_matches('/').to_string(),
             site_key,
             secret,
