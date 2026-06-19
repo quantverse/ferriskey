@@ -196,9 +196,10 @@ export function usePortalPageSubmit(
           first_name: String(data.get('first_name') ?? '').trim() || null,
           last_name: String(data.get('last_name') ?? '').trim() || null,
           // The generated RegistrationRequest type doesn't model captcha_token,
-          // so cast the body — same approach as page-register-feature.tsx.
+          // so widen the body type to add it — this keeps the other fields
+          // type-checked (unlike a blanket `as never`).
           captcha_token: captchaTokenFromForm(data),
-        } as never,
+        } as Schemas.RegistrationRequest & { captcha_token?: string },
       })
     },
     [realm_name, registration],
