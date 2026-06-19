@@ -1,4 +1,4 @@
-import { useState, type CSSProperties, type ReactNode } from 'react'
+import { useCallback, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { OTPInput, type SlotProps } from 'input-otp'
 import {
   AlertCircle,
@@ -7,14 +7,17 @@ import {
   Loader2,
   Mail,
   QrCode as QrCodeIcon,
+  ShieldCheck,
 } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
 import type { Schemas } from '@/api/api.client'
+import { CapCaptcha } from '@/components/cap-captcha'
 import ProviderIcon, {
   isProviderIconKey,
 } from '@/pages/identity-providers/components/provider-icon'
 import type { BuilderNode } from '../builder-core'
 import { PortalInput } from './components/portal-input'
+import { captchaAlignToJustify } from './captcha'
 
 type RenderOptions = {
   /** Replaces <page-content /> nodes with this slot content (used by layouts). */
@@ -371,6 +374,11 @@ function renderNode(node: BuilderNode, options: RenderOptions): ReactNode {
         <FormErrorBannerBlock key={node.id} node={node} options={options} />
       )
 
+    case 'captcha':
+      return (
+        <PortalCaptchaBlock key={node.id} node={node} options={options} />
+      )
+
     case 'input':
     case 'username_input':
     case 'first_name_input':
@@ -682,6 +690,69 @@ export function FormErrorBannerBlock({
     >
       <AlertCircle size={16} aria-hidden style={{ marginTop: 1, flexShrink: 0 }} />
       <span style={{ flex: 1 }}>{message}</span>
+    </div>
+  )
+}
+
+/**
+ * Captcha block. At runtime renders the Cap proof-of-work widget and a hidden
+ * `captcha_token` input; when the user solves the challenge the token is
+ * written into the hidden input, so the surrounding <form>'s FormData carries
+ * it to the submit handler exactly like any other field — no wrapper plumbing.
+ *
+ * The widget itself only appears when `VITE_CAP_API_ENDPOINT` is configured
+ * (CapCaptcha returns null otherwise); the hidden input is always present so
+ * the field exists in FormData regardless.
+ *
+ * In the builder canvas / preview (`options.runtime` falsy) we render a static
+ * placeholder — no network call, no live widget — so the admin can position
+ * the block without solving a challenge.
+ */
+export function PortalCaptchaBlock({
+  node,
+  options,
+}: {
+  node: BuilderNode
+  options: RenderOptions
+}) {
+  const hiddenRef = useRef<HTMLInputElement | null>(null)
+  const handleSolve = useCallback((token: string) => {
+    if (hiddenRef.current) hiddenRef.current.value = token
+  }, [])
+  const justifyContent = captchaAlignToJustify(node.props.align as string | undefined)
+
+  if (!options.runtime) {
+    return (
+      <div
+        data-fk-id={node.id}
+        style={{ display: 'flex', justifyContent, ...orderStyle(node) }}
+      >
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: '12px 16px',
+            borderRadius: 'var(--fk-radius-input, 6px)',
+            border: '1px dashed var(--border, #d4d4d8)',
+            color: 'var(--muted-foreground, #71717a)',
+            fontSize: 12,
+          }}
+        >
+          <ShieldCheck size={16} aria-hidden />
+          <span>Captcha — shown to end-users when enabled</span>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div
+      data-fk-id={node.id}
+      style={{ display: 'flex', justifyContent, ...orderStyle(node) }}
+    >
+      <CapCaptcha onSolve={handleSolve} />
+      <input type='hidden' name='captcha_token' ref={hiddenRef} />
     </div>
   )
 }
