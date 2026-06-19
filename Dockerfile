@@ -81,7 +81,12 @@ RUN pnpm install --frozen-lockfile
 
 COPY front/ .
 
-RUN VITE_API_URL="" pnpm run build
+# Cap proof-of-work captcha endpoint, baked in at build time. When empty the
+# CapCaptcha widget renders nothing (captcha effectively disabled on the front).
+# Point this at the Cap server's site URL, e.g. http://localhost:3000/<site-key>/
+ARG VITE_CAP_API_ENDPOINT=""
+
+RUN VITE_API_URL="" VITE_CAP_API_ENDPOINT="$VITE_CAP_API_ENDPOINT" pnpm run build
 
 # ── Frontend runtime ──────────────────────────────────────────────────────────
 FROM nginxinc/nginx-unprivileged:1.31.1-alpine3.23-slim AS webapp
@@ -89,6 +94,14 @@ FROM nginxinc/nginx-unprivileged:1.31.1-alpine3.23-slim AS webapp
 COPY --from=webapp-build /usr/local/src/ferriskey/dist /usr/local/src/ferriskey
 COPY front/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --chmod=0755 front/docker-entrypoint.sh /docker-entrypoint.d/docker-entrypoint.sh
+
+USER root
+
+# Remove default files and ensure the runtime user (101) can write to the html directory
+RUN rm -f /usr/share/nginx/html/50x.html /usr/share/nginx/html/index.html && \
+    chown -R 101:101 /usr/share/nginx/html
+
+USER 101
 
 # ── Standalone image (API + Frontend, single container) ───────────────────────
 FROM debian:bookworm-slim AS standalone
