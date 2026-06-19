@@ -544,6 +544,15 @@ export const portalComponents: ComponentDefinition[] = [
     },
     defaultStyles: {},
   },
+  {
+    type: 'captcha',
+    label: 'Captcha',
+    icon: <ShieldCheck size={14} />,
+    defaultProps: {
+      align: 'center',
+    },
+    defaultStyles: {},
+  },
 ]
 
 /**
@@ -769,6 +778,9 @@ export const RESTRICTED_TO_PAGE_TYPE: Record<string, ReadonlySet<string>> = {
   user_code_input: new Set(['device_verify']),
   device_approve_button: new Set(['device_verify']),
   device_deny_button: new Set(['device_verify']),
+  // Captcha enforcement (backend) only covers login + self-service register,
+  // so only offer the block where it can do something.
+  captcha: new Set(['login', 'register']),
 }
 
 const DEFAULT_CONTENT: Partial<Record<string, string>> = {
