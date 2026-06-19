@@ -70,7 +70,7 @@ services:
     environment:
       API_URL: http://localhost:3333
     ports:
-      - 5555:80
+      - 5555:8080
     profiles:
       - build
 
@@ -122,6 +122,11 @@ services:
     build:
       context: .
       target: standalone
+      args:
+        # Baked into the frontend bundle at build time. Must match the Cap
+        # site key created in the Cap dashboard (http://localhost:3000).
+        # Format: http://localhost:3000/<site-key>/
+        VITE_CAP_API_ENDPOINT: ${VITE_CAP_API_ENDPOINT:-}
     environment:
       DATABASE_HOST: db
       DATABASE_NAME: ferriskey
@@ -130,6 +135,14 @@ services:
       SERVER_ROOT_PATH: /api
       ALLOWED_ORIGINS: http://localhost:8090
       WEBAPP_URL: http://localhost:8090
+      # Cap captcha (backend enforcement). Disabled unless CAP_ENABLED=true.
+      # CAP_SITE_KEY / CAP_SECRET come from the Cap dashboard. The API reaches
+      # the Cap service over the compose network at http://cap:3000.
+      CAP_ENABLED: ${CAP_ENABLED:-false}
+      CAP_VERIFY_URL: ${CAP_VERIFY_URL:-http://cap:3000}
+      CAP_SITE_KEY: ${CAP_SITE_KEY:-}
+      CAP_SECRET: ${CAP_SECRET:-}
+      CAP_FAIL_OPEN: ${CAP_FAIL_OPEN:-false}
     ports:
       - 8090:80
     depends_on:
@@ -174,7 +187,7 @@ services:
   # The site key + secret are created in the Cap dashboard (http://localhost:3000,
   # log in with ADMIN_KEY) and supplied to the API via CAP_SITE_KEY / CAP_SECRET.
   cap:
-    image: ghcr.io/tiagorangel1/cap:standalone
+    image: tiago2/cap:latest
     environment:
       ADMIN_KEY: ${CAP_ADMIN_KEY:-change-me-32-chars-minimum-please}
       REDIS_URL: redis://keydb:6379

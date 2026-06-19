@@ -46,6 +46,7 @@ It aims to be a serious open‑source alternative to heavyweight IAMs fast, modu
 - [Features](#-features)
 - [Quick Start](#-quick-start)
 - [Configuration](#-configuration)
+- [Captcha (Cap)](#-captcha-cap)
 - [Database Migrations](#️-database-migrations)
 - [Modules](#-modules)
 - [Architecture](#-architecture)
@@ -154,6 +155,60 @@ ALLOWED_ORIGINS=http://localhost:5555
 ```
 
 By default, the API will listen on port 3333 and the frontend on port 5555.
+
+## 🛡️ Captcha (Cap)
+
+FerrisKey can protect its credential endpoints with a [Cap](https://github.com/tiagorangel1/cap) proof-of-work captcha. When enabled, a captcha challenge is enforced on:
+
+- the login form (`/login-actions/authenticate`),
+- user self-registration (`/protocol/openid-connect/registrations`),
+- the public password grant (`/protocol/openid-connect/token`, public clients only — confidential clients with a secret are exempt).
+
+Captcha is **global and disabled by default** — it is driven entirely by environment variables, not by a per-realm setting. The standalone compose stack already ships a `cap` service (and a `keydb` backing it) on port `3000`.
+
+### Configuration
+
+Two sides must be configured: the **backend** (enforcement) and the **frontend** (rendering the widget).
+
+| Variable                  | Side     | Default            | Description |
+|---------------------------|----------|--------------------|---|
+| `CAP_ENABLED`             | backend  | `false`            | Master switch for backend enforcement. |
+| `CAP_VERIFY_URL`          | backend  | `http://cap:3000`  | Base URL of the Cap server, reached over the compose network. The API appends `/<site-key>/siteverify`. |
+| `CAP_SITE_KEY`            | backend  | `""`               | Site key minted in the Cap dashboard. |
+| `CAP_SECRET`              | backend  | `""`               | Secret minted in the Cap dashboard. |
+| `CAP_FAIL_OPEN`           | backend  | `false`            | If `true`, allow requests through when the Cap service is unreachable (fail-open). Default fails closed with `503`. |
+| `VITE_CAP_API_ENDPOINT`   | frontend | `""`               | **Build-time** browser-reachable widget endpoint, e.g. `http://localhost:3000/<site-key>/`. When empty the widget renders nothing. |
+
+> **Browser vs. in-network URL:** the browser reaches Cap at `localhost:3000` (`VITE_CAP_API_ENDPOINT`), while the API reaches it in-network at `http://cap:3000` (`CAP_VERIFY_URL`).
+>
+> **`VITE_CAP_API_ENDPOINT` is baked in at build time**, so changing it requires rebuilding the frontend (`--build`), not just a restart.
+
+### Enabling captcha (standalone compose)
+
+1. Bring up the Cap service and mint credentials:
+
+   ```bash
+   docker compose --profile standalone up -d cap
+   ```
+
+   Open [http://localhost:3000](http://localhost:3000), log in with your `CAP_ADMIN_KEY`, and create a site key — note the **site key** and **secret**.
+
+2. Set the host environment variables (e.g. in a `.env` next to `docker-compose.yaml`):
+
+   ```bash
+   CAP_ENABLED=true
+   CAP_SITE_KEY=<site-key>
+   CAP_SECRET=<secret>
+   VITE_CAP_API_ENDPOINT=http://localhost:3000/<site-key>/
+   ```
+
+3. Rebuild and start the stack (the frontend env var is baked in at build time):
+
+   ```bash
+   docker compose --profile standalone up -d --build
+   ```
+
+> **Note:** the captcha widget is rendered only by the built-in login/register pages. Custom Portal-builder templates do not yet render a captcha block.
 
 ## 🗄️ Database Migrations
 
