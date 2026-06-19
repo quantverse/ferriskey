@@ -191,6 +191,13 @@ async fn main() -> Result<(), anyhow::Error> {
         }
     }
 
+    // Bound the in-memory abuse-control maps (brute-force guard + rate limiter)
+    // with a periodic eviction sweep so they cannot grow without bound.
+    crate::application::security::spawn_security_reaper(
+        app_state.brute_force.clone(),
+        app_state.rate_limiter.clone(),
+    );
+
     let router = router(app_state)?;
 
     let addr = {

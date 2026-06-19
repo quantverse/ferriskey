@@ -11,6 +11,10 @@ pub trait BruteForceGuard: Send + Sync {
     fn check(&self, realm: &str, username: &str) -> bool;
     fn record_failure(&self, realm: &str, username: &str);
     fn record_success(&self, realm: &str, username: &str);
+    /// Evict entries that are no longer active (throttle expired AND failure
+    /// window elapsed). Called periodically so the map cannot grow without
+    /// bound under username/IP probing.
+    fn sweep(&self);
 }
 
 #[derive(Clone)]
@@ -80,6 +84,17 @@ impl BruteForceGuard for InMemoryBruteForceGuard {
         let key = Self::key(realm, username);
         self.entries.remove(&key);
     }
+
+    fn sweep(&self) {
+        let now = Instant::now();
+        self.entries.retain(|_, entry| {
+            // Still actively throttled — must keep.
+            let actively_throttled = entry.throttled_until.is_some_and(|until| now < until);
+            // Failure window still open — could still accumulate; keep.
+            let window_open = now.duration_since(entry.window_start) <= self.window;
+            actively_throttled || window_open
+        });
+    }
 }
 
 #[cfg(test)]
@@ -124,6 +139,27 @@ mod tests {
         g.record_failure("master", "alice");
         assert!(g.check("master", "alice"));
         assert!(!g.check("master", "bob"));
+    }
+
+    #[test]
+    fn sweep_evicts_stale_entries() {
+        // window=0 and throttle=0: a recorded entry becomes stale almost immediately.
+        let g = InMemoryBruteForceGuard::new(1, Duration::from_secs(0), Duration::from_secs(0));
+        g.record_failure("master", "ghost");
+        assert_eq!(g.entries.len(), 1);
+        // Advance past window_start / throttled_until.
+        std::thread::sleep(Duration::from_millis(5));
+        g.sweep();
+        assert_eq!(g.entries.len(), 0, "stale entry should be evicted");
+    }
+
+    #[test]
+    fn sweep_keeps_actively_throttled_entries() {
+        let g = InMemoryBruteForceGuard::new(1, Duration::from_secs(300), Duration::from_secs(300));
+        g.record_failure("master", "alice"); // throttled for 300s
+        g.sweep();
+        assert_eq!(g.entries.len(), 1, "active throttle must be retained");
+        assert!(g.check("master", "alice"));
     }
 
     #[test]

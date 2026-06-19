@@ -5,6 +5,7 @@ use crate::application::http::server::{
     },
     app_state::AppState,
 };
+use crate::application::security::credential_failure::is_credential_rejection;
 use axum::{Extension, extract::State};
 use axum_cookie::CookieManager;
 use ferriskey_core::domain::authentication::value_objects::Identity;
@@ -63,9 +64,10 @@ pub async fn challenge_otp(
     let bf_key = format!("otp:{}", identity.id());
 
     if state.brute_force.check(&bf_realm, &bf_key) {
-        return Err(ApiError::TooManyRequests(
-            "too many incorrect codes, try again later".into(),
-        ));
+        return Err(ApiError::TooManyRequests {
+            message: "too many incorrect codes, try again later".into(),
+            retry_after_secs: state.args.security.login_throttle_secs,
+        });
     }
 
     let result = match state
@@ -84,8 +86,14 @@ pub async fn challenge_otp(
             result
         }
         Err(e) => {
-            state.brute_force.record_failure(&bf_realm, &bf_key);
-            return Err(ApiError::InternalServerError(e.to_string().into()));
+            // Only an actual wrong code counts toward the per-account throttle;
+            // infrastructure/session errors must not lock the account out.
+            if is_credential_rejection(&e) {
+                state.brute_force.record_failure(&bf_realm, &bf_key);
+            }
+            // Map via From<CoreError> so a wrong code is 401 (not 500) and the
+            // internal error string is not echoed back to the client.
+            return Err(e.into());
         }
     };
 

@@ -6,6 +6,7 @@ use crate::application::http::{
     authentication::validators::TokenRequestValidator,
     server::api_entities::api_error::ApiErrorResponse,
 };
+use crate::application::security::credential_failure::is_credential_rejection;
 use crate::application::url::FullUrl;
 use axum::{
     Form,
@@ -88,9 +89,10 @@ pub async fn exchange_token(
         if let Some(username) = payload_username.as_deref()
             && state.brute_force.check(&realm_for_bf, username)
         {
-            return Err(ApiError::TooManyRequests(
-                "too many failed login attempts, try again later".into(),
-            ));
+            return Err(ApiError::TooManyRequests {
+                message: "too many failed login attempts, try again later".into(),
+                retry_after_secs: state.args.security.login_throttle_secs,
+            });
         }
     }
 
@@ -130,7 +132,12 @@ pub async fn exchange_token(
                 token
             }
             Err(error) => {
-                if is_public_password_grant && let Some(username) = payload_username.as_deref() {
+                // Only genuine credential rejections count toward the throttle —
+                // not infrastructure/session errors (lockout-DoS guard).
+                if is_public_password_grant
+                    && is_credential_rejection(&error)
+                    && let Some(username) = payload_username.as_deref()
+                {
                     state.brute_force.record_failure(&realm_for_bf, username);
                 }
                 warn!(
