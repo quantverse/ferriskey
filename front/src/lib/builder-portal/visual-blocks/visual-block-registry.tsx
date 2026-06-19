@@ -30,6 +30,7 @@ import {
   TotpQrCodeBlock,
   TotpSecretBlock,
   FormErrorBannerBlock,
+  PortalCaptchaBlock,
 } from '../renderer'
 import { InlineTextEditor } from './inline-text-editor'
 
@@ -204,6 +205,14 @@ export function renderVisualBlock(
       return (
         <div style={chromeStyle(isSelected)}>
           <FormErrorBannerBlock node={node} options={{}} />
+        </div>
+      )
+    case 'captcha':
+      // Canvas preview: reuse the runtime block with no `runtime` option so it
+      // renders the static placeholder (no live widget / network).
+      return (
+        <div style={chromeStyle(isSelected)}>
+          <PortalCaptchaBlock node={node} options={{}} />
         </div>
       )
     case 'page-content':
