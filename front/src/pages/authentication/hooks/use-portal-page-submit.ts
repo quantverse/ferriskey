@@ -14,6 +14,7 @@ import type { Schemas } from '@/api/api.client'
 import { useAuth } from '@/hooks/use-auth'
 import { useOAuthParams } from './use-oauth-params'
 import { POST_LOGIN_RETURN_KEY } from '../feature/page-device-verify-feature'
+import { captchaTokenFromForm } from '@/lib/builder-portal/captcha'
 
 export type DeviceVerifyResult = 'approved' | 'denied' | null
 
@@ -113,7 +114,7 @@ export function usePortalPageSubmit(
       const { clientId } = getAuthParamsFromUrl()
       authenticate(
         {
-          data: { username, password },
+          data: { username, password, captcha_token: captchaTokenFromForm(data) },
           realm: realm_name ?? 'master',
           clientId,
         },
@@ -213,7 +214,10 @@ export function usePortalPageSubmit(
           username: String(data.get('username') ?? '').trim() || email.split('@')[0],
           first_name: String(data.get('first_name') ?? '').trim() || null,
           last_name: String(data.get('last_name') ?? '').trim() || null,
-        },
+          // The generated RegistrationRequest type doesn't model captcha_token,
+          // so cast the body — same approach as page-register-feature.tsx.
+          captcha_token: captchaTokenFromForm(data),
+        } as never,
       })
     },
     [realm_name, registration],
