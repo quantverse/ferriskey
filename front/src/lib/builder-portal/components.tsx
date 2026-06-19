@@ -491,6 +491,15 @@ export const portalComponents: ComponentDefinition[] = [
     },
     defaultStyles: {},
   },
+  {
+    type: 'captcha',
+    label: 'Captcha',
+    icon: <ShieldCheck size={14} />,
+    defaultProps: {
+      align: 'center',
+    },
+    defaultStyles: {},
+  },
 ]
 
 /**
@@ -670,6 +679,9 @@ export const HIDDEN_BLOCKS_BY_PAGE_TYPE: Record<string, ReadonlySet<string>> = {
 export const RESTRICTED_TO_PAGE_TYPE: Record<string, ReadonlySet<string>> = {
   totp_qr_code: new Set(['totp_setup']),
   totp_secret: new Set(['totp_setup']),
+  // Captcha enforcement (backend) only covers login + self-service register,
+  // so only offer the block where it can do something.
+  captcha: new Set(['login', 'register']),
 }
 
 const DEFAULT_CONTENT: Partial<Record<string, string>> = {
