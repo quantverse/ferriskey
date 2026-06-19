@@ -56,6 +56,10 @@ export interface PortalInputProps {
   helperText?: string
 }
 
+export interface PortalCaptchaProps {
+  align?: 'left' | 'center' | 'right'
+}
+
 export type PortalNodeType =
   | 'container'
   | 'heading'
@@ -67,4 +71,5 @@ export type PortalNodeType =
   | 'input'
   | 'magic_link_button'
   | 'passkey_button'
+  | 'captcha'
   | 'page-content'
