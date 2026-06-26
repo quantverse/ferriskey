@@ -13,6 +13,7 @@ pub struct ApiSpec {
     pub webapp_url: String,
     pub api_url: String,
     pub allowed_origins: Vec<String>,
+    pub captcha: CaptchaConfig,
 }
 
 impl Default for ApiSpec {
@@ -21,8 +22,18 @@ impl Default for ApiSpec {
             webapp_url: "http://localhost:3000".to_string(),
             api_url: "http://localhost:8080".to_string(),
             allowed_origins: vec!["http://localhost:3000".to_string()],
+            captcha: CaptchaConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CaptchaConfig {
+    pub enabled: bool,
+    pub verify_url: String,
+    pub site_key: String,
+    pub secret_ref: Option<SecretReference>,
+    pub fail_open: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

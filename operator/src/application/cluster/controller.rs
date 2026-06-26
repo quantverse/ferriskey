@@ -68,6 +68,18 @@ async fn reconcile(
         allowed_origins: cluster.spec.api.allowed_origins.clone(),
         api_url: cluster.spec.api.api_url.clone(),
         webapp_url: cluster.spec.api.webapp_url.clone(),
+        captcha: crate::domain::cluster::entities::CaptchaConfig {
+            enabled: cluster.spec.api.captcha.enabled,
+            verify_url: cluster.spec.api.captcha.verify_url.clone(),
+            site_key: cluster.spec.api.captcha.site_key.clone(),
+            secret_ref: cluster.spec.api.captcha.secret_ref.as_ref().map(|sr| {
+                SecretReference {
+                    name: sr.name.clone(),
+                    namespace: sr.namespace.clone(),
+                }
+            }),
+            fail_open: cluster.spec.api.captcha.fail_open,
+        },
     };
 
     let spec = ClusterSpec {

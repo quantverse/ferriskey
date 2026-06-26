@@ -37,6 +37,34 @@ pub struct ApiSpec {
 
     /// Allowed origins for CORS
     pub allowed_origins: Vec<String>,
+
+    /// Cap (proof-of-work) captcha configuration
+    #[serde(default)]
+    pub captcha: CaptchaSpec,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptchaSpec {
+    /// Enable captcha on login and token endpoints
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Base URL of the Cap siteverify service (e.g. https://cap.example.com)
+    #[serde(default)]
+    pub verify_url: String,
+
+    /// Cap site key (public, created in the Cap dashboard)
+    #[serde(default)]
+    pub site_key: String,
+
+    /// Reference to a secret containing the Cap secret key under key "secret"
+    #[serde(default)]
+    pub secret_ref: Option<SecretReference>,
+
+    /// When true, allow login to proceed if the Cap service is unreachable
+    #[serde(default)]
+    pub fail_open: bool,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]

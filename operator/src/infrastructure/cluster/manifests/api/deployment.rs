@@ -16,7 +16,7 @@ pub fn make_deployment(spec: &ClusterSpec, namespace: &str) -> Deployment {
     let admin_secret_name = format!("ferriskey-admin-{}", spec.name);
     let db_secret_ref = spec.database.secret_ref.name.clone();
 
-    let env_vars = vec![
+    let mut env_vars = vec![
         EnvVar {
             name: "DATABASE_HOST".to_string(),
             value: None,
@@ -134,7 +134,44 @@ pub fn make_deployment(spec: &ClusterSpec, namespace: &str) -> Deployment {
             value: Some(spec.api.allowed_origins.join(",")),
             ..Default::default()
         },
+        // Cap (proof-of-work) captcha configuration
+        EnvVar {
+            name: "CAP_ENABLED".to_string(),
+            value: Some(spec.api.captcha.enabled.to_string()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "CAP_VERIFY_URL".to_string(),
+            value: Some(spec.api.captcha.verify_url.clone()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "CAP_SITE_KEY".to_string(),
+            value: Some(spec.api.captcha.site_key.clone()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "CAP_FAIL_OPEN".to_string(),
+            value: Some(spec.api.captcha.fail_open.to_string()),
+            ..Default::default()
+        },
     ];
+
+    // CAP_SECRET is sourced from a Kubernetes secret when a secret_ref is configured.
+    if let Some(secret_ref) = &spec.api.captcha.secret_ref {
+        env_vars.push(EnvVar {
+            name: "CAP_SECRET".to_string(),
+            value: None,
+            value_from: Some(EnvVarSource {
+                secret_key_ref: Some(SecretKeySelector {
+                    name: secret_ref.name.clone(),
+                    key: "secret".to_string(),
+                    optional: Some(false),
+                }),
+                ..Default::default()
+            }),
+        });
+    }
 
     Deployment {
         metadata: ObjectMeta {

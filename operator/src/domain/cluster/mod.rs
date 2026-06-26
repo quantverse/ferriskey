@@ -30,6 +30,7 @@ pub mod test_helpers {
                 webapp_url: "https://app.ferriskey.io".to_string(),
                 api_url: "https://api.ferriskey.io".to_string(),
                 allowed_origins: vec!["https://app.ferriskey.io".to_string()],
+                captcha: Default::default(),
             },
         }
     }
