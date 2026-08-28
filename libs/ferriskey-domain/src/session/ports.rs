@@ -1,0 +1,96 @@
+use chrono::Duration;
+use uuid::Uuid;
+
+use crate::auth::Identity;
+use crate::common::app_errors::CoreError;
+use crate::session::entities::{SessionError, UserSession};
+
+#[cfg_attr(any(test, feature = "mock"), mockall::automock)]
+pub trait TokenRevocationPort: Send + Sync {
+    fn revoke_session_tokens(
+        &self,
+        session_id: Uuid,
+    ) -> impl Future<Output = Result<(), CoreError>> + Send;
+
+    fn revoke_all_user_access(
+        &self,
+        user_id: Uuid,
+        realm_id: Uuid,
+    ) -> impl Future<Output = Result<(), CoreError>> + Send;
+}
+
+pub trait UserSessionService: Send + Sync {
+    fn create_session(
+        &self,
+        user_id: Uuid,
+        realm_id: Uuid,
+        user_agent: Option<String>,
+        ip_address: Option<String>,
+        session_duration: Duration,
+        soft_expiry_duration: Option<Duration>,
+    ) -> impl Future<Output = Result<UserSession, SessionError>> + Send;
+}
+
+pub trait UserSessionManagementService: Send + Sync {
+    fn list_sessions(
+        &self,
+        identity: Identity,
+        realm_name: String,
+        user_id: Uuid,
+    ) -> impl Future<Output = Result<Vec<UserSession>, CoreError>> + Send;
+
+    /// Revoke a session by hard-deleting its row. Returns the session as it was
+    /// just before deletion so callers can emit an audit event for it — the row
+    /// is gone afterwards and cannot be read back.
+    fn revoke_session(
+        &self,
+        identity: Identity,
+        realm_name: String,
+        user_id: Uuid,
+        session_id: Uuid,
+    ) -> impl Future<Output = Result<UserSession, CoreError>> + Send;
+}
+
+#[cfg_attr(any(test, feature = "mock"), mockall::automock)]
+pub trait UserSessionRepository: Send + Sync {
+    fn create(
+        &self,
+        session: &UserSession,
+    ) -> impl Future<Output = Result<(), SessionError>> + Send;
+
+    fn find_by_user_id(
+        &self,
+        user_id: &Uuid,
+    ) -> impl Future<Output = Result<UserSession, SessionError>> + Send;
+
+    fn find_all_by_user_and_realm(
+        &self,
+        user_id: Uuid,
+        realm_id: Uuid,
+    ) -> impl Future<Output = Result<Vec<UserSession>, SessionError>> + Send;
+
+    fn find_by_id(
+        &self,
+        session_id: Uuid,
+    ) -> impl Future<Output = Result<Option<UserSession>, SessionError>> + Send;
+
+    fn delete(&self, id: &Uuid) -> impl Future<Output = Result<(), SessionError>> + Send;
+
+    fn delete_all_by_user(
+        &self,
+        user_id: Uuid,
+        realm_id: Uuid,
+    ) -> impl Future<Output = Result<u64, SessionError>> + Send;
+
+    fn delete_expired_for_user(
+        &self,
+        user_id: Uuid,
+        realm_id: Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> impl Future<Output = Result<u64, SessionError>> + Send;
+
+    fn update_last_seen(
+        &self,
+        session_id: Uuid,
+    ) -> impl Future<Output = Result<(), SessionError>> + Send;
+}

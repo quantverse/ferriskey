@@ -156,6 +156,8 @@ mod tests {
             alias: alias.to_string(),
             domain: None,
             attributes: HashMap::new(),
+            roles: Vec::new(),
+            client_roles: HashMap::new(),
         }
     }
 
@@ -174,6 +176,8 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
+            roles: Vec::new(),
+            client_roles: HashMap::new(),
         }
     }
 
@@ -193,6 +197,7 @@ mod tests {
             realm_id: RealmId::new(Uuid::new_v4()),
             user_attributes: HashMap::new(),
             organizations,
+            groups: vec![],
         }
     }
 
@@ -399,6 +404,8 @@ mod tests {
             alias: "stable".to_string(),
             domain: None,
             attributes: HashMap::new(),
+            roles: Vec::new(),
+            client_roles: HashMap::new(),
         };
 
         let result = mapper

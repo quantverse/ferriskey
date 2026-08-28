@@ -31,6 +31,7 @@ import {
   TotpSecretBlock,
   FormErrorBannerBlock,
   PortalCaptchaBlock,
+  treeToReactNode,
 } from '../renderer'
 import { InlineTextEditor } from './inline-text-editor'
 
@@ -175,6 +176,8 @@ export function renderVisualBlock(
       return <TotpInputBlock node={node} isSelected={isSelected} />
     case 'user_code_input':
       return <UserCodeInputBlock node={node} isSelected={isSelected} />
+    case 'device_consent':
+      return <div data-selected={isSelected}>{treeToReactNode([node])}</div>
     case 'identity_providers':
       return <IdentityProvidersPreview node={node} isSelected={isSelected} />
     case 'forgot_password_link':

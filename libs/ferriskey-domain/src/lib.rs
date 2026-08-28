@@ -6,9 +6,12 @@ pub mod auth;
 pub mod authentication;
 pub mod client;
 pub mod common;
+pub mod credential;
+pub mod crypto;
 pub mod maintenance;
 pub mod realm;
 pub mod role;
+pub mod session;
 pub mod token_lifetime;
 pub mod user;
 

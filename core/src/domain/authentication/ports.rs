@@ -8,10 +8,10 @@ use crate::domain::realm::entities::RealmId;
 use crate::domain::{
     authentication::{
         entities::{
-            AuthInput, AuthOutput, AuthSession, AuthenticateInput, AuthenticateOutput,
-            AuthenticationError, AuthorizeRequestInput, AuthorizeRequestOutput,
-            CredentialsAuthParams, ExchangeTokenInput, GrantType, JwtToken,
-            TokenIntrospectionResponse, WebAuthnChallenge,
+            AuthCompletion, AuthInput, AuthOutput, AuthSession, AuthenticateInput,
+            AuthenticateOutput, AuthenticationError, AuthorizeRequestInput, AuthorizeRequestOutput,
+            CredentialsAuthParams, ExchangeTokenInput, JwtToken, TokenIntrospectionResponse,
+            WebAuthnChallenge,
         },
         value_objects::{
             AuthenticationResult, CreateAuthSessionRequest, GrantTypeParams, RegisterUserInput,
@@ -22,18 +22,9 @@ use crate::domain::{
     jwt::entities::JwkKey,
 };
 
-/// A strategy for handling different OAuth2 grant types during authentication.
-///
-/// This trait defines the contract for implementing specific grant type strategies,
-/// such as `AuthorizationCode`, `ClientCredentials`, or `Password` grant types.
-/// Each implementation of this trait should handle the logic for its respective grant type.
-pub trait GrantTypeService: Send + Sync {
-    fn authenticate_with_grant_type(
-        &self,
-        grant_type: GrantType,
-        params: GrantTypeParams,
-    ) -> impl Future<Output = Result<JwtToken, AuthenticationError>> + Send;
-}
+// `GrantTypeService` now lives in `ferriskey-domain` (its signature touches only plain types).
+// Re-exported so existing `crate::domain::authentication::ports::GrantTypeService` sites resolve.
+pub use ferriskey_domain::authentication::ports::GrantTypeService;
 
 pub trait AuthSessionService: Send + Sync {
     fn create_session(
@@ -216,11 +207,11 @@ pub trait AuthenticatePort: Send + Sync {
         auth_session: AuthSession,
     ) -> impl Future<Output = Result<AuthenticateOutput, CoreError>> + Send;
 
-    fn build_redirect_url(
+    fn build_auth_completion(
         &self,
         auth_session: &AuthSession,
         authorization_code: &str,
-    ) -> Result<String, CoreError>;
+    ) -> Result<AuthCompletion, CoreError>;
 
     fn using_session_code(
         &self,
@@ -231,4 +222,27 @@ pub trait AuthenticatePort: Send + Sync {
         password: String,
         base_url: String,
     ) -> impl Future<Output = Result<AuthenticationResult, CoreError>> + Send;
+}
+
+pub struct LoginActionToken {
+    pub jti: Uuid,
+    pub user_id: Uuid,
+    pub realm_id: Uuid,
+    pub auth_session_id: Uuid,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub consumed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+pub trait LoginActionTokenRepository: Send + Sync {
+    fn create(
+        &self,
+        token: LoginActionToken,
+    ) -> impl Future<Output = Result<(), AuthenticationError>> + Send;
+
+    fn get_by_jti(
+        &self,
+        jti: Uuid,
+    ) -> impl Future<Output = Result<Option<LoginActionToken>, AuthenticationError>> + Send;
+
+    fn consume(&self, jti: Uuid) -> impl Future<Output = Result<bool, AuthenticationError>> + Send;
 }

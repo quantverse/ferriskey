@@ -1,0 +1,196 @@
+use super::auth::root_scoped_base_url;
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header::SET_COOKIE};
+use axum::response::IntoResponse;
+use axum_cookie::CookieManager;
+use axum_extra::extract::cookie::{Cookie, SameSite};
+use ferriskey_api_core::api_entities::api_error::{ApiError, ValidateJson};
+use ferriskey_api_core::app_state::AppState;
+use ferriskey_api_core::decoded_token::OptionalToken;
+use ferriskey_api_core::security::credential_failure::is_credential_rejection;
+use ferriskey_api_core::url::FullUrl;
+
+use ferriskey_core::domain::authentication::entities::AuthenticateInput;
+use ferriskey_core::domain::authentication::entities::AuthenticationStepStatus;
+use ferriskey_core::domain::authentication::ports::AuthService;
+use ferriskey_core::domain::email_verification::ports::EmailVerificationService;
+use ferriskey_core::domain::user::entities::RequiredAction;
+use serde::{Deserialize, Serialize};
+use tracing::warn;
+use utoipa::ToSchema;
+use uuid::Uuid;
+use validator::Validate;
+
+pub use ferriskey_api_core::authentication::{AuthenticateResponse, AuthenticationStatus};
+
+pub const LOGIN_ACTION_COOKIE: &str = "FERRISKEY_LOGIN_ACTION";
+
+#[derive(Serialize, Deserialize)]
+pub struct AuthenticateQueryParams {
+    client_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, ToSchema)]
+pub struct AuthenticateRequest {
+    #[validate(length(min = 1, message = "username is required"))]
+    #[serde(default)]
+    pub username: Option<String>,
+
+    #[validate(length(min = 1, message = "password is required"))]
+    #[serde(default)]
+    pub password: Option<String>,
+
+    #[serde(default)]
+    pub captcha_token: Option<String>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/login-actions/authenticate",
+    tag = "auth",
+    summary = "Authenticate a user in a realm",
+    request_body = AuthenticateRequest,
+    params(
+        ("realm_name" = String, Path, description = "Realm name"),
+    ),
+    responses(
+        (status = 200, description = "Authenticated", body = AuthenticateResponse),
+        (status = 400, description = "Invalid input", body = ApiError),
+        (status = 401, description = "Missing session cookie", body = ApiError),
+        (status = 401, description = "Invalid realm", body = ApiError),
+        (status = 500, description = "Internal server error", body = ApiError)
+    )
+)]
+pub async fn authenticate(
+    Path(realm_name): Path<String>,
+    State(state): State<AppState>,
+    FullUrl(_, base_url): FullUrl,
+    OptionalToken(optional_token): OptionalToken,
+    Query(query): Query<AuthenticateQueryParams>,
+    cookie: CookieManager,
+    ValidateJson(payload): ValidateJson<AuthenticateRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let session_code = match cookie.get("FERRISKEY_SESSION") {
+        Some(cookie) => cookie,
+        None => return Err(ApiError::Unauthorized("Missing session cookie".into())),
+    };
+    let session_code = session_code.value().to_string();
+
+    let session_code = Uuid::parse_str(&session_code)
+        .map_err(|_| ApiError::BadRequest("Invalid session code in cookie".into()))?;
+
+    let base_url = root_scoped_base_url(&base_url, &state.args.server.root_path);
+
+    // Remember whether we are on the credentials path before optional_token is moved.
+    let is_credentials_path = optional_token.is_none();
+
+    // CAPTCHA must pass before any credential work. No-op verifier when disabled.
+    if is_credentials_path {
+        state
+            .captcha
+            .verify(payload.captcha_token.as_deref())
+            .await?;
+    }
+
+    let authenticate_params = if let Some(token) = optional_token {
+        AuthenticateInput::with_existing_token(
+            realm_name.clone(),
+            query.client_id.clone(),
+            session_code,
+            base_url.clone(),
+            token.token,
+        )
+    } else {
+        let username = payload
+            .username
+            .clone()
+            .ok_or_else(|| ApiError::BadRequest("username is required".into()))?;
+        let password = payload
+            .password
+            .clone()
+            .ok_or_else(|| ApiError::BadRequest("password is required".into()))?;
+
+        if state.brute_force.check(&realm_name, &username) {
+            return Err(ApiError::TooManyRequests {
+                message: "too many failed login attempts, try again later".into(),
+                retry_after_secs: state.args.security.login_throttle_secs,
+            });
+        }
+
+        AuthenticateInput::with_user_credentials(
+            realm_name.clone(),
+            query.client_id.clone(),
+            session_code,
+            base_url.clone(),
+            username,
+            password,
+        )
+    };
+
+    let result = match state.service.authenticate(authenticate_params).await {
+        Ok(result) => {
+            if is_credentials_path && let Some(username) = payload.username.as_deref() {
+                state.brute_force.record_success(&realm_name, username);
+            }
+            result
+        }
+        Err(e) => {
+            // Only count genuine credential rejections — never infrastructure or
+            // session errors — so an induced 5xx cannot lock out an account.
+            if is_credentials_path
+                && is_credential_rejection(&e)
+                && let Some(username) = payload.username.as_deref()
+            {
+                state.brute_force.record_failure(&realm_name, username);
+            }
+            return Err(e.into());
+        }
+    };
+
+    // If user has VerifyEmail required action, automatically send verification email
+    if result.status == AuthenticationStepStatus::RequiresActions
+        && result
+            .required_actions
+            .contains(&RequiredAction::VerifyEmail)
+    {
+        let verification_base_url = state.args.webapp_url.trim_end_matches('/').to_string();
+
+        if let Err(e) = state
+            .service
+            .email_verification_service
+            .send_verification_email(result.user_id, realm_name.clone(), verification_base_url)
+            .await
+        {
+            // Log the error but don't fail the authentication - user can still use resend button
+            warn!(
+                user_id = %result.user_id,
+                realm = %realm_name,
+                error = %e,
+                "Failed to send verification email during authentication"
+            );
+        }
+    }
+
+    let step_token = result.temporary_token.clone();
+    let response: AuthenticateResponse = result.into();
+
+    let mut headers = HeaderMap::new();
+    if let Some(token) = step_token {
+        let mut flow_cookie = Cookie::build((LOGIN_ACTION_COOKIE, token))
+            .path(format!("/realms/{realm_name}/login-actions"))
+            .http_only(true)
+            .same_site(SameSite::Lax);
+
+        if base_url.starts_with("https") {
+            flow_cookie = flow_cookie.secure(true)
+        }
+
+        headers.insert(
+            SET_COOKIE,
+            HeaderValue::from_str(&flow_cookie.to_string())
+                .map_err(|_| ApiError::InternalServerError("Invalid cookie header".into()))?,
+        );
+    }
+
+    Ok((StatusCode::OK, headers, axum::Json(response)).into_response())
+}

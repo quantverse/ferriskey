@@ -9,6 +9,7 @@ use crate::domain::{
         value_objects::CreateClientRequest,
     },
     common::{
+        console_callback_uri,
         entities::{InitializationResult, StartupConfig, app_errors::CoreError},
         generate_random_string,
         ports::CoreService,
@@ -47,6 +48,46 @@ where
     pub(crate) hasher_repository: Arc<H>,
     pub(crate) credential_repository: Arc<CR>,
     pub(crate) redirect_uri_repository: Arc<RU>,
+}
+
+async fn ensure_admin_password_credential<CR, H>(
+    credential_repository: &CR,
+    hasher_repository: &H,
+    user_id: uuid::Uuid,
+    username: &str,
+    password: &str,
+) -> Result<(), CoreError>
+where
+    H: HasherRepository,
+    CR: CredentialRepository,
+{
+    if credential_repository
+        .has_password_credential(user_id)
+        .await
+        .map_err(|_| CoreError::GetPasswordCredentialError)?
+    {
+        tracing::info!(
+            "password credential already exists for user {username}; configured admin password is not applied"
+        );
+        return Ok(());
+    }
+
+    let hash = hasher_repository
+        .hash_password(password)
+        .await
+        .map_err(|e| CoreError::HashPasswordError(e.to_string()))?;
+
+    match credential_repository
+        .create_credential(user_id, "password".to_string(), hash, "".into(), false)
+        .await
+    {
+        Ok(_) => tracing::info!("credential created for user {username}"),
+        Err(error) => {
+            tracing::error!("failed to create password credential for user {username}: {error:?}")
+        }
+    }
+
+    Ok(())
 }
 
 impl<R, K, C, U, RO, UR, H, CR, RU> CoreServiceImpl<R, K, C, U, RO, UR, H, CR, RU>
@@ -177,12 +218,14 @@ where
                         client_id: config.default_client_id.clone(),
                         enabled: true,
                         protocol: "openid-connect".to_string(),
-                        public_client: false,
+                        // Browser SPA: no secret to keep, PKCE instead.
+                        public_client: true,
                         service_account_enabled: false,
                         direct_access_grants_enabled: false,
                         oauth_device_code_grant_enabled: false,
-                        client_type: ClientType::Confidential,
-                        secret: Some(generate_random_string()),
+                        client_type: ClientType::Public,
+                        secret: None,
+                        require_pkce: true,
                     })
                     .await
                     .map_err(|_| CoreError::CreateClientError)?;
@@ -221,6 +264,7 @@ where
                         oauth_device_code_grant_enabled: false,
                         client_type: ClientType::Confidential,
                         secret: Some(generate_random_string()),
+                        require_pkce: false,
                     })
                     .await
                     .map_err(|_| CoreError::CreateClientError)?;
@@ -254,6 +298,7 @@ where
                         oauth_device_code_grant_enabled: true,
                         client_type: ClientType::System,
                         secret: None,
+                        require_pkce: false,
                     })
                     .await
                     .map_err(|_| CoreError::CreateClientError)?;
@@ -343,32 +388,23 @@ where
             }
         }
 
-        let hash = self
-            .hasher_repository
-            .hash_password(&config.admin_password)
-            .await
-            .map_err(|e| CoreError::HashPasswordError(e.to_string()))?;
+        ensure_admin_password_credential(
+            self.credential_repository.as_ref(),
+            self.hasher_repository.as_ref(),
+            user.id,
+            &user.username,
+            &config.admin_password,
+        )
+        .await?;
 
-        match self
-            .credential_repository
-            .create_credential(user.id, "password".to_string(), hash, "".into(), false)
-            .await
-        {
-            Ok(_) => {
-                tracing::info!("credential created for user {:}", user.username);
-            }
-            Err(_) => {
-                tracing::info!("credential already exists for user {:}", user.username);
-            }
-        }
-
-        let admin_redirect_patterns = vec![
-            // Pattern regex pour accepter toutes les URLs sur localhost avec n'importe quel port
-            "^http://localhost:[0-9]+/.*",
-            "^/*",
-            "http://localhost:3000/admin",
-            "http://localhost:5173/admin",
-        ];
+        // Exactly one redirect URI: the console's own callback on this deployment's
+        // origin. The previous list seeded `^/*`, a regex accepting every URI, which
+        // handed the master realm's authorization codes to any host an attacker named
+        // (FK-002).
+        let admin_redirect_patterns = vec![console_callback_uri(
+            &config.webapp_url,
+            &config.master_realm_name,
+        )];
 
         let existing_uris = self
             .redirect_uri_repository
@@ -410,13 +446,6 @@ where
             .await
             .unwrap_or_default();
 
-        let console_redirect_patterns = [
-            "^http://localhost:[0-9]+/.*",
-            "^/*",
-            "http://localhost:3000/admin",
-            "http://localhost:5173/admin",
-        ];
-
         for r in &all_realms {
             if r.id == realm.id {
                 // master is already handled above
@@ -442,12 +471,14 @@ where
                             client_id: config.default_client_id.clone(),
                             enabled: true,
                             protocol: "openid-connect".to_string(),
-                            public_client: false,
+                            // Browser SPA: no secret to keep, PKCE instead.
+                            public_client: true,
                             service_account_enabled: false,
                             direct_access_grants_enabled: false,
                             oauth_device_code_grant_enabled: false,
-                            client_type: ClientType::Confidential,
-                            secret: Some(generate_random_string()),
+                            client_type: ClientType::Public,
+                            secret: None,
+                            require_pkce: true,
                         })
                         .await
                     {
@@ -473,20 +504,20 @@ where
                 .await
                 .unwrap_or_default();
 
-            for pattern in &console_redirect_patterns {
-                if !existing_uris.iter().any(|uri| &uri.value == pattern)
-                    && let Err(e) = self
-                        .redirect_uri_repository
-                        .create_redirect_uri(console_client.id, pattern.to_string(), true)
-                        .await
-                {
-                    tracing::error!(
-                        "failed to create redirect URI '{}' for security-admin-console in realm '{}': {}",
-                        pattern,
-                        r.name,
-                        e
-                    );
-                }
+            let callback_uri = console_callback_uri(&config.webapp_url, &r.name);
+
+            if !existing_uris.iter().any(|uri| uri.value == callback_uri)
+                && let Err(e) = self
+                    .redirect_uri_repository
+                    .create_redirect_uri(console_client.id, callback_uri.clone(), true)
+                    .await
+            {
+                tracing::error!(
+                    "failed to create redirect URI '{}' for security-admin-console in realm '{}': {}",
+                    callback_uri,
+                    r.name,
+                    e
+                );
             }
         }
 
@@ -532,6 +563,8 @@ pub mod tests {
             roles: Some(Vec::new()),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            failed_login_attempts: 0,
+            locked_until: None,
         }
     }
 
@@ -551,6 +584,8 @@ pub mod tests {
             lastname: Some("Doe".to_string()),
             required_actions: Vec::new(),
             roles: Some(Vec::new()),
+            failed_login_attempts: 0,
+            locked_until: None,
         }
     }
 
@@ -575,6 +610,8 @@ pub mod tests {
             lastname: Some("Doe".to_string()),
             required_actions: Vec::new(),
             roles: Some(Vec::new()),
+            failed_login_attempts: 0,
+            locked_until: None,
         }
     }
 
@@ -605,6 +642,8 @@ pub mod tests {
             email_verified: true,
             required_actions: Vec::new(),
             roles: Some(Vec::new()),
+            failed_login_attempts: 0,
+            locked_until: None,
         }
     }
 
@@ -640,6 +679,7 @@ pub mod tests {
             realm_id,
             client_id: None,
             client: None,
+            require_mfa: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -660,6 +700,7 @@ pub mod tests {
             realm_id,
             client_id,
             client: None,
+            require_mfa: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -674,7 +715,7 @@ pub mod tests {
         let client = Client {
             id: Uuid::new_v4(),
             client_id: "test-client".to_string(),
-            secret: Some("secret".to_string()),
+            secret: Some(maskass::Masked::new("secret".to_string())),
             name: "Test Client".to_string(),
             realm_id,
             enabled: true,
@@ -726,5 +767,40 @@ pub mod tests {
             Ok(value) => value,
             Err(error) => panic!("Expected success, but got error: {:?}", error),
         }
+    }
+}
+
+#[cfg(test)]
+mod initialization_tests {
+    use super::*;
+    use crate::domain::{
+        common::services::tests::create_test_user, credential::ports::MockCredentialRepository,
+        crypto::MockHasherRepository, realm::entities::RealmId,
+    };
+    use mockall::predicate::eq;
+
+    #[tokio::test]
+    async fn skips_creating_admin_password_when_one_already_exists() -> Result<(), CoreError> {
+        let user = create_test_user(RealmId::default());
+
+        let mut credential_repository = MockCredentialRepository::new();
+        credential_repository
+            .expect_has_password_credential()
+            .with(eq(user.id))
+            .times(1)
+            .return_once(|_| Box::pin(async move { Ok(true) }));
+
+        let hasher_repository = MockHasherRepository::new();
+
+        ensure_admin_password_credential(
+            &credential_repository,
+            &hasher_repository,
+            user.id,
+            &user.username,
+            "admin-password",
+        )
+        .await?;
+
+        Ok(())
     }
 }

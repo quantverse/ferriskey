@@ -17,30 +17,20 @@ COPY --from=planner /usr/local/src/ferriskey/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 
 COPY . .
-RUN cargo build --release
+# Only these two binaries are shipped; skip the rest of the workspace.
+RUN cargo build --release --bin ferriskey-api --bin ferriskey-operator
 
 # ── Shared runtime base ───────────────────────────────────────────────────────
-FROM debian:bookworm-slim AS runtime
+# distroless/cc ships glibc, libgcc_s, libssl3/libcrypto3 and ca-certificates —
+# exactly the dynamic dependencies of our binaries — in ~34 MB, where
+# debian:bookworm-slim plus the equivalent apt packages costs ~106 MB.
+# It has no shell and no package manager: every entrypoint used against these
+# images (`ferriskey-api`, `ferriskey-operator`, `sqlx migrate run`) is an exec
+# of a binary on PATH, so nothing depends on /bin/sh.
+FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
 
-RUN \
-    apt-get update && \
-    apt-get install -y --no-install-recommends \
-    ca-certificates=20230311+deb12u1 \
-    libssl3=3.0.17-1~deb12u2 && \
-    rm -rf /var/lib/apt/lists/* && \
-    addgroup \
-    --system \
-    --gid 1000 \
-    ferriskey && \
-    adduser \
-    --system \
-    --no-create-home \
-    --disabled-login \
-    --uid 1000 \
-    --gid 1000 \
-    ferriskey
-
-USER ferriskey
+# distroless defaults WORKDIR to /home/nonroot; keep / as before.
+WORKDIR /
 
 # ── API image ─────────────────────────────────────────────────────────────────
 FROM runtime AS api
@@ -95,9 +85,10 @@ FROM nginxinc/nginx-unprivileged:1.31.1-alpine3.23-slim AS webapp
 # runs as the non-root "nginx" user. The runtime entrypoint wipes and repopulates
 # that directory, so it must be owned by the runtime user — otherwise the rm fails
 # with "Permission denied" and (under `set -e`) nginx never starts.
-USER root
+# Numeric ids (hadolint DL3066): 0 = root, 101 = the image's nginx user.
+USER 0
 RUN rm -rf /usr/share/nginx/html/* && chown -R nginx:nginx /usr/share/nginx/html
-USER nginx
+USER 101
 
 COPY --from=webapp-build /usr/local/src/ferriskey/dist /usr/local/src/ferriskey
 COPY front/nginx.conf /etc/nginx/conf.d/default.conf

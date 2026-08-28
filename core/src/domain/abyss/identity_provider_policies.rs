@@ -1,182 +1,21 @@
-use crate::domain::{
-    abyss::identity_provider::{IdentityProvider, IdentityProviderPolicy},
-    authentication::value_objects::Identity,
-    client::ports::ClientRepository,
-    common::{
-        entities::app_errors::CoreError,
-        policies::{FerriskeyPolicy, Policy},
-    },
-    realm::entities::{Realm, RealmId},
-    role::entities::permission::Permissions,
-    user::ports::{UserRepository, UserRoleRepository},
-};
-
-impl<U, C, UR> IdentityProviderPolicy for FerriskeyPolicy<U, C, UR>
-where
-    U: UserRepository,
-    C: ClientRepository,
-    UR: UserRoleRepository,
-{
-    /// Checks if the identity can create identity providers in the given realm
-    ///
-    /// Requires ManageRealm permission on the target realm.
-    async fn can_create_identity_provider(
-        &self,
-        identity: &Identity,
-        realm_id: RealmId,
-    ) -> Result<bool, CoreError> {
-        let user = self.get_user_from_identity(identity).await?;
-
-        // Get the user's realm to check access
-        let user_realm = user
-            .realm
-            .as_ref()
-            .ok_or(CoreError::Forbidden("user has no realm".to_string()))?;
-
-        // Check realm access: same realm OR user is from master realm
-        let is_same_realm = user_realm.id == realm_id;
-        let is_master_realm = user_realm.name == "master";
-
-        if !is_same_realm && !is_master_realm {
-            return Ok(false);
-        }
-
-        // Build a temporary realm for permission lookup
-        let target_realm = Realm {
-            id: realm_id,
-            name: user_realm.name.clone(),
-            display_name: None,
-            settings: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-
-        let permissions = self
-            .get_permission_for_target_realm(&user, &target_realm)
-            .await?;
-
-        let has_permission =
-            Permissions::has_one_of_permissions(&permissions, &[Permissions::ManageRealm]);
-
-        Ok(has_permission)
-    }
-
-    /// Checks if the identity can view the given identity provider
-    ///
-    /// Requires ViewRealm or ManageRealm permission on the provider's realm.
-    async fn can_view_identity_provider(
-        &self,
-        identity: &Identity,
-        provider: &IdentityProvider,
-    ) -> Result<bool, CoreError> {
-        let user = self.get_user_from_identity(identity).await?;
-
-        let user_realm = user
-            .realm
-            .as_ref()
-            .ok_or(CoreError::Forbidden("user has no realm".to_string()))?;
-
-        // Check realm access: same realm OR user is from master realm
-        let is_same_realm = user_realm.id == provider.realm_id;
-        let is_master_realm = user_realm.name == "master";
-
-        if !is_same_realm && !is_master_realm {
-            return Ok(false);
-        }
-
-        // Build a temporary realm for permission lookup
-        let target_realm = Realm {
-            id: provider.realm_id,
-            name: user_realm.name.clone(),
-            display_name: None,
-            settings: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-
-        let permissions = self
-            .get_permission_for_target_realm(&user, &target_realm)
-            .await?;
-
-        let has_permission = Permissions::has_one_of_permissions(
-            &permissions,
-            &[Permissions::ManageRealm, Permissions::ViewRealm],
-        );
-
-        Ok(has_permission)
-    }
-
-    /// Checks if the identity can update the given identity provider
-    ///
-    /// Requires ManageRealm permission on the provider's realm.
-    async fn can_update_identity_provider(
-        &self,
-        identity: &Identity,
-        provider: &IdentityProvider,
-    ) -> Result<bool, CoreError> {
-        let user = self.get_user_from_identity(identity).await?;
-
-        let user_realm = user
-            .realm
-            .as_ref()
-            .ok_or(CoreError::Forbidden("user has no realm".to_string()))?;
-
-        // Check realm access: same realm OR user is from master realm
-        let is_same_realm = user_realm.id == provider.realm_id;
-        let is_master_realm = user_realm.name == "master";
-
-        if !is_same_realm && !is_master_realm {
-            return Ok(false);
-        }
-
-        // Build a temporary realm for permission lookup
-        let target_realm = Realm {
-            id: provider.realm_id,
-            name: user_realm.name.clone(),
-            display_name: None,
-            settings: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-
-        let permissions = self
-            .get_permission_for_target_realm(&user, &target_realm)
-            .await?;
-
-        let has_permission =
-            Permissions::has_one_of_permissions(&permissions, &[Permissions::ManageRealm]);
-
-        Ok(has_permission)
-    }
-
-    /// Checks if the identity can delete the given identity provider
-    ///
-    /// Requires ManageRealm permission on the provider's realm.
-    async fn can_delete_identity_provider(
-        &self,
-        identity: &Identity,
-        provider: &IdentityProvider,
-    ) -> Result<bool, CoreError> {
-        // Delete has the same requirements as update
-        self.can_update_identity_provider(identity, provider).await
-    }
-}
-
+//! Tests for the `IdentityProviderPolicy` impl on `FerriskeyPolicy`.
+//! The impl now lives in `ferriskey-abyss`; these tests stay in `core` where the repository
+//! mocks (`mock` feature) and cross-domain entities are already wired up.
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::domain::{
-        abyss::identity_provider::{IdentityProviderConfig, IdentityProviderCreationConfig},
-        client::ports::MockClientRepository,
-        realm::entities::Realm,
-        role::entities::Role,
-        user::{
-            entities::User,
-            ports::{MockUserRepository, MockUserRoleRepository},
-        },
-    };
     use std::sync::Arc;
+
     use uuid::Uuid;
+
+    use crate::domain::abyss::identity_provider::IdentityProviderPolicy;
+    use crate::domain::authentication::value_objects::Identity;
+    use crate::domain::client::ports::MockClientRepository;
+    use crate::domain::common::policies::FerriskeyPolicy;
+    use crate::domain::realm::entities::{Realm, RealmId};
+    use crate::domain::role::entities::Role;
+    use crate::domain::role::entities::permission::Permissions;
+    use crate::domain::user::entities::User;
+    use crate::domain::user::ports::{MockUserRepository, MockUserRoleRepository};
 
     fn create_test_realm(name: &str) -> Realm {
         Realm {
@@ -205,28 +44,9 @@ mod tests {
             required_actions: vec![],
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            failed_login_attempts: 0,
+            locked_until: None,
         }
-    }
-
-    fn create_test_identity_provider(realm_id: RealmId) -> IdentityProvider {
-        IdentityProvider::new(IdentityProviderCreationConfig {
-            realm_id,
-            alias: "google".to_string(),
-            provider_id: "oidc".to_string(),
-            enabled: true,
-            display_name: Some("Google".to_string()),
-            first_broker_login_flow_alias: None,
-            post_broker_login_flow_alias: None,
-            store_token: false,
-            add_read_token_role_on_create: false,
-            trust_email: false,
-            link_only: false,
-            config: IdentityProviderConfig {
-                client_id: None,
-                client_secret: None,
-                extra: serde_json::json!({}),
-            },
-        })
     }
 
     fn create_role_with_permission(realm_id: RealmId, permission: Permissions) -> Role {
@@ -238,6 +58,43 @@ mod tests {
             realm_id,
             client_id: None,
             client: None,
+            require_mfa: false,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    /// The `{realm}-realm` client through which a master user is delegated rights on
+    /// another realm. It lives in the *master* realm, which is where
+    /// `get_permission_for_target_realm` looks it up.
+    fn create_test_client(
+        realm_id: RealmId,
+        client_id: &str,
+    ) -> crate::domain::client::entities::Client {
+        use crate::domain::client::entities::{Client, ClientType, MaintenanceSessionStrategy};
+
+        Client {
+            id: Uuid::new_v4(),
+            client_id: client_id.to_string(),
+            secret: None,
+            name: client_id.to_string(),
+            realm_id,
+            enabled: true,
+            public_client: false,
+            direct_access_grants_enabled: false,
+            oauth_device_code_grant_enabled: false,
+            require_pkce: false,
+            service_account_enabled: false,
+            client_type: ClientType::Confidential,
+            protocol: "openid-connect".to_string(),
+            redirect_uris: None,
+            access_token_lifetime: None,
+            refresh_token_lifetime: None,
+            id_token_lifetime: None,
+            temporary_token_lifetime: None,
+            maintenance_enabled: false,
+            maintenance_reason: None,
+            maintenance_session_strategy: MaintenanceSessionStrategy::default(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
@@ -247,7 +104,6 @@ mod tests {
     async fn test_can_view_identity_provider_with_manage_realm_permission() {
         let realm = create_test_realm("test");
         let user = create_test_user_with_realm(&realm);
-        let provider = create_test_identity_provider(realm.id);
         let identity = Identity::User(user.clone());
 
         let user_repo = MockUserRepository::new();
@@ -266,9 +122,7 @@ mod tests {
             Arc::new(user_role_repo),
         );
 
-        let result = policy
-            .can_view_identity_provider(&identity, &provider)
-            .await;
+        let result = policy.can_view_identity_provider(&identity, &realm).await;
 
         assert!(result.is_ok());
         assert!(result.unwrap());
@@ -278,7 +132,6 @@ mod tests {
     async fn test_can_view_identity_provider_with_view_realm_permission() {
         let realm = create_test_realm("test");
         let user = create_test_user_with_realm(&realm);
-        let provider = create_test_identity_provider(realm.id);
         let identity = Identity::User(user.clone());
 
         let user_repo = MockUserRepository::new();
@@ -297,9 +150,7 @@ mod tests {
             Arc::new(user_role_repo),
         );
 
-        let result = policy
-            .can_view_identity_provider(&identity, &provider)
-            .await;
+        let result = policy.can_view_identity_provider(&identity, &realm).await;
 
         assert!(result.is_ok());
         assert!(result.unwrap());
@@ -309,7 +160,6 @@ mod tests {
     async fn test_cannot_view_identity_provider_without_permission() {
         let realm = create_test_realm("test");
         let user = create_test_user_with_realm(&realm);
-        let provider = create_test_identity_provider(realm.id);
         let identity = Identity::User(user.clone());
 
         let user_repo = MockUserRepository::new();
@@ -326,9 +176,7 @@ mod tests {
             Arc::new(user_role_repo),
         );
 
-        let result = policy
-            .can_view_identity_provider(&identity, &provider)
-            .await;
+        let result = policy.can_view_identity_provider(&identity, &realm).await;
 
         assert!(result.is_ok());
         assert!(!result.unwrap());
@@ -338,7 +186,6 @@ mod tests {
     async fn test_can_update_identity_provider_requires_manage_realm() {
         let realm = create_test_realm("test");
         let user = create_test_user_with_realm(&realm);
-        let provider = create_test_identity_provider(realm.id);
         let identity = Identity::User(user.clone());
 
         let user_repo = MockUserRepository::new();
@@ -357,9 +204,7 @@ mod tests {
             Arc::new(user_role_repo),
         );
 
-        let result = policy
-            .can_update_identity_provider(&identity, &provider)
-            .await;
+        let result = policy.can_update_identity_provider(&identity, &realm).await;
 
         assert!(result.is_ok());
         assert!(result.unwrap());
@@ -369,7 +214,6 @@ mod tests {
     async fn test_cannot_update_identity_provider_with_only_view_permission() {
         let realm = create_test_realm("test");
         let user = create_test_user_with_realm(&realm);
-        let provider = create_test_identity_provider(realm.id);
         let identity = Identity::User(user.clone());
 
         let user_repo = MockUserRepository::new();
@@ -388,9 +232,7 @@ mod tests {
             Arc::new(user_role_repo),
         );
 
-        let result = policy
-            .can_update_identity_provider(&identity, &provider)
-            .await;
+        let result = policy.can_update_identity_provider(&identity, &realm).await;
 
         assert!(result.is_ok());
         assert!(!result.unwrap());
@@ -401,7 +243,6 @@ mod tests {
         let user_realm = create_test_realm("user_realm");
         let provider_realm = create_test_realm("provider_realm");
         let user = create_test_user_with_realm(&user_realm);
-        let provider = create_test_identity_provider(provider_realm.id);
         let identity = Identity::User(user.clone());
 
         let user_repo = MockUserRepository::new();
@@ -415,10 +256,111 @@ mod tests {
         );
 
         let result = policy
-            .can_view_identity_provider(&identity, &provider)
+            .can_view_identity_provider(&identity, &provider_realm)
             .await;
 
         assert!(result.is_ok());
         assert!(!result.unwrap());
+    }
+
+    // ---- FK-006: master reaching another realm ------------------------------
+    //
+    // These two are the case the previous suite claimed to cover and did not. Its
+    // `test_master_realm_can_access_other_realms` built the target realm with
+    // `name: user_realm.name.clone()`, which forced `is_cross_realm_access` to false,
+    // so `get_client_specific_permissions` was never called and its mock was never
+    // consulted. The assertion passed through the unscoped union instead — the very
+    // branch the fix removes. Each test below sets `.times(1)` on the client lookup
+    // so that regression cannot pass silently again.
+
+    #[tokio::test]
+    async fn master_reaching_another_realm_uses_only_that_realms_client_roles() {
+        let master_realm = create_test_realm("master");
+        let target_realm = create_test_realm("other");
+        let user = create_test_user_with_realm(&master_realm);
+        let identity = Identity::User(user.clone());
+
+        let target_client = create_test_client(master_realm.id, "other-realm");
+        let client_id = target_client.id;
+
+        let mut client_repo = MockClientRepository::new();
+        client_repo
+            .expect_get_by_client_id()
+            .times(1)
+            .returning(move |_, _| {
+                let c = target_client.clone();
+                Box::pin(async move { Ok(c) })
+            });
+
+        // Scoped to the `other-realm` client: this is a legitimate delegation.
+        let mut role = create_role_with_permission(master_realm.id, Permissions::ManageRealm);
+        role.client_id = Some(client_id);
+
+        let mut user_role_repo = MockUserRoleRepository::new();
+        user_role_repo.expect_get_user_roles().returning(move |_| {
+            let r = role.clone();
+            Box::pin(async move { Ok(vec![r]) })
+        });
+
+        let policy = FerriskeyPolicy::new(
+            Arc::new(MockUserRepository::new()),
+            Arc::new(client_repo),
+            Arc::new(user_role_repo),
+        );
+
+        let result = policy
+            .can_view_identity_provider(&identity, &target_realm)
+            .await;
+
+        assert!(result.is_ok());
+        assert!(
+            result.unwrap(),
+            "a master role scoped to the target realm's client must grant access"
+        );
+    }
+
+    #[tokio::test]
+    async fn master_realm_role_does_not_leak_into_another_realm() {
+        let master_realm = create_test_realm("master");
+        let target_realm = create_test_realm("other");
+        let user = create_test_user_with_realm(&master_realm);
+        let identity = Identity::User(user.clone());
+
+        let target_client = create_test_client(master_realm.id, "other-realm");
+
+        let mut client_repo = MockClientRepository::new();
+        client_repo
+            .expect_get_by_client_id()
+            .times(1)
+            .returning(move |_, _| {
+                let c = target_client.clone();
+                Box::pin(async move { Ok(c) })
+            });
+
+        // A plain realm role of `master` — `client_id: None`. Under the old code the
+        // unscoped union picked it up and granted access to `other`.
+        let role = create_role_with_permission(master_realm.id, Permissions::ManageRealm);
+
+        let mut user_role_repo = MockUserRoleRepository::new();
+        user_role_repo.expect_get_user_roles().returning(move |_| {
+            let r = role.clone();
+            Box::pin(async move { Ok(vec![r]) })
+        });
+
+        let policy = FerriskeyPolicy::new(
+            Arc::new(MockUserRepository::new()),
+            Arc::new(client_repo),
+            Arc::new(user_role_repo),
+        );
+
+        let result = policy
+            .can_view_identity_provider(&identity, &target_realm)
+            .await;
+
+        assert!(result.is_ok());
+        assert!(
+            !result.unwrap(),
+            "a master role that is not scoped to the target realm's client must not grant access"
+        );
     }
 }

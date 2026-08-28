@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, DatabaseConnection, DbErr,
     EntityTrait, ModelTrait, QueryFilter, SqlErr,
@@ -25,12 +26,16 @@ fn classify_user_unique_violation_message(message: &str) -> Option<UserUniqueVio
     let err_str = message.to_lowercase();
 
     if err_str.contains("unique_username_realm_id")
+        || err_str.contains("unique_lower_username_per_realm")
         || err_str.contains("key (username")
+        || err_str.contains("key (realm_id, lower(username")
         || err_str.contains("username, realm_id")
     {
         Some(UserUniqueViolation::Username)
     } else if err_str.contains("unique_email_per_realm")
+        || err_str.contains("unique_lower_email_per_realm")
         || err_str.contains("key (email")
+        || err_str.contains("key (realm_id, lower(email")
         || err_str.contains("email, realm_id")
     {
         Some(UserUniqueViolation::Email)
@@ -84,6 +89,8 @@ impl UserRepository for PostgresUserRepository {
             client_id: Set(user.client_id),
             created_at: Set(user.created_at.naive_utc()),
             updated_at: Set(user.updated_at.naive_utc()),
+            failed_login_attempts: Set(0),
+            locked_until: Set(None),
         };
 
         let t =
@@ -104,13 +111,18 @@ impl UserRepository for PostgresUserRepository {
         Ok(user)
     }
 
-    async fn get_by_username(
+    async fn find_by_username(
         &self,
         username: String,
         realm_id: RealmId,
-    ) -> Result<User, CoreError> {
+    ) -> Result<Option<User>, CoreError> {
         let users_model = crate::entity::users::Entity::find()
-            .filter(crate::entity::users::Column::Username.eq(username.clone()))
+            .filter(
+                sea_orm::sea_query::Expr::expr(sea_orm::sea_query::Func::lower(
+                    sea_orm::sea_query::Expr::col(crate::entity::users::Column::Username),
+                ))
+                .eq(username.trim().to_lowercase()),
+            )
             .filter(crate::entity::users::Column::RealmId.eq::<Uuid>(realm_id.into()))
             .find_also_related(crate::entity::realms::Entity)
             .all(&self.db)
@@ -120,9 +132,9 @@ impl UserRepository for PostgresUserRepository {
                 CoreError::NotFound
             })?;
 
-        let user_model = users_model.first().cloned();
-
-        let (user_model, realm_model) = user_model.ok_or(CoreError::NotFound)?;
+        let Some((user_model, realm_model)) = users_model.first().cloned() else {
+            return Ok(None);
+        };
 
         let required_actions: Vec<RequiredAction> = user_model
             .find_related(crate::entity::user_required_actions::Entity)
@@ -139,14 +151,22 @@ impl UserRepository for PostgresUserRepository {
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut user: User = user_model.clone().into();
-
         user.required_actions = required_actions;
-
         if let Some(realm_model) = realm_model.as_ref() {
             user.realm = Some(realm_model.clone().into());
         }
 
-        Ok(user)
+        Ok(Some(user))
+    }
+
+    async fn get_by_username(
+        &self,
+        username: String,
+        realm_id: RealmId,
+    ) -> Result<User, CoreError> {
+        self.find_by_username(username, realm_id)
+            .await?
+            .ok_or(CoreError::NotFound)
     }
 
     #[instrument]
@@ -220,7 +240,12 @@ impl UserRepository for PostgresUserRepository {
         realm_id: RealmId,
     ) -> Result<Option<User>, CoreError> {
         let user = crate::entity::users::Entity::find()
-            .filter(crate::entity::users::Column::Email.eq(email))
+            .filter(
+                sea_orm::sea_query::Expr::expr(sea_orm::sea_query::Func::lower(
+                    sea_orm::sea_query::Expr::col(crate::entity::users::Column::Email),
+                ))
+                .eq(email.trim().to_lowercase()),
+            )
             .filter(crate::entity::users::Column::RealmId.eq::<Uuid>(realm_id.into()))
             .one(&self.db)
             .await
@@ -232,12 +257,13 @@ impl UserRepository for PostgresUserRepository {
         Ok(user.map(|u| u.into()))
     }
 
-    async fn bulk_delete_user(&self, ids: Vec<Uuid>) -> Result<u64, CoreError> {
+    async fn bulk_delete_user(&self, realm_id: RealmId, ids: Vec<Uuid>) -> Result<u64, CoreError> {
         let rows = crate::entity::users::Entity::delete_many()
             .filter(
                 Condition::all()
                     .add(crate::entity::users::Column::Id.is_in(ids.clone()))
-                    .add(crate::entity::users::Column::ClientId.is_null()),
+                    .add(crate::entity::users::Column::ClientId.is_null())
+                    .add(crate::entity::users::Column::RealmId.eq(Uuid::from(realm_id))),
             )
             .exec(&self.db)
             .await
@@ -289,6 +315,87 @@ impl UserRepository for PostgresUserRepository {
 
         Ok(updated_user.into())
     }
+
+    #[instrument(skip(self), err)]
+    async fn increment_failed_login_attempts(
+        &self,
+        user_id: Uuid,
+        locked_until: Option<DateTime<Utc>>,
+    ) -> Result<(), CoreError> {
+        let user = crate::entity::users::Entity::find()
+            .filter(crate::entity::users::Column::Id.eq(user_id))
+            .one(&self.db)
+            .await
+            .map_err(|e| {
+                error!("error finding user for lockout increment: {:?}", e);
+                CoreError::InternalServerError
+            })?
+            .ok_or(CoreError::NotFound)?;
+
+        let current_attempts = user.failed_login_attempts;
+        let mut active_model: crate::entity::users::ActiveModel = user.into();
+        active_model.failed_login_attempts = Set(current_attempts + 1);
+
+        if let Some(until) = locked_until {
+            active_model.locked_until = Set(Some(until.fixed_offset()));
+            active_model.failed_login_attempts = Set(0);
+        }
+
+        active_model.update(&self.db).await.map_err(|e| {
+            error!("error incrementing failed login attempts: {:?}", e);
+            CoreError::InternalServerError
+        })?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err)]
+    async fn reset_failed_login_attempts(&self, user_id: Uuid) -> Result<(), CoreError> {
+        let user = crate::entity::users::Entity::find()
+            .filter(crate::entity::users::Column::Id.eq(user_id))
+            .one(&self.db)
+            .await
+            .map_err(|e| {
+                error!("error finding user for lockout reset: {:?}", e);
+                CoreError::InternalServerError
+            })?
+            .ok_or(CoreError::NotFound)?;
+
+        let mut active_model: crate::entity::users::ActiveModel = user.into();
+        active_model.failed_login_attempts = Set(0);
+        active_model.locked_until = Set(None);
+
+        active_model.update(&self.db).await.map_err(|e| {
+            error!("error resetting failed login attempts: {:?}", e);
+            CoreError::InternalServerError
+        })?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err)]
+    async fn unlock_user(&self, user_id: Uuid) -> Result<(), CoreError> {
+        let user = crate::entity::users::Entity::find()
+            .filter(crate::entity::users::Column::Id.eq(user_id))
+            .one(&self.db)
+            .await
+            .map_err(|e| {
+                error!("error finding user for unlock: {:?}", e);
+                CoreError::InternalServerError
+            })?
+            .ok_or(CoreError::NotFound)?;
+
+        let mut active_model: crate::entity::users::ActiveModel = user.into();
+        active_model.failed_login_attempts = Set(0);
+        active_model.locked_until = Set(None);
+
+        active_model.update(&self.db).await.map_err(|e| {
+            error!("error unlocking user: {:?}", e);
+            CoreError::InternalServerError
+        })?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -313,6 +420,23 @@ mod tests {
 
         assert_eq!(
             classify_user_unique_violation_message(message),
+            Some(UserUniqueViolation::Email)
+        );
+    }
+
+    #[test]
+    fn classifies_the_case_insensitive_indexes() {
+        assert_eq!(
+            classify_user_unique_violation_message(
+                r#"ERROR: duplicate key value violates unique constraint "unique_lower_username_per_realm""#
+            ),
+            Some(UserUniqueViolation::Username)
+        );
+
+        assert_eq!(
+            classify_user_unique_violation_message(
+                r#"ERROR: duplicate key value violates unique constraint "unique_lower_email_per_realm""#
+            ),
             Some(UserUniqueViolation::Email)
         );
     }

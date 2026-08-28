@@ -12,7 +12,9 @@ use crate::{
             ClientScopeServiceImpl, ProtocolMapperServiceImpl, ScopeMappingServiceImpl,
         },
         authentication::{
-            device_flow::services::{DeviceFlowConfig, DeviceFlowServiceImpl},
+            device_flow::services::{
+                DeviceFlowConfig, DeviceFlowServiceImpl, purge_expired_device_sessions_task,
+            },
             mapper_engine::MapperEngine,
             services::AuthServiceImpl,
         },
@@ -27,6 +29,8 @@ use crate::{
         email_verification::services::EmailVerificationServiceImpl,
         health::services::HealthServiceImpl,
         maintenance::services::MaintenanceServiceImpl,
+        organization::group_services::GroupServiceImpl,
+        organization::member_role_services::OrganizationMemberRoleServiceImpl,
         organization::services::OrganizationServiceImpl,
         password_policy::service::PasswordPolicyService,
         portal_layouts::services::PortalLayoutsServiceImpl,
@@ -50,6 +54,8 @@ use crate::{
             client_postgres_repository::PostgresClientRepository,
             post_logout_redirect_uri_postgres_repository::PostgresPostLogoutRedirectUriRepository,
             redirect_uri_postgres_repository::PostgresRedirectUriRepository,
+            saml_postgres_repository::PostgresClientSamlRepository,
+            web_origin_postgres_repository::PostgresWebOriginRepository,
         },
         compass::{
             repositories::{PostgresCompassFlowRepository, PostgresCompassFlowStepRepository},
@@ -71,8 +77,14 @@ use crate::{
             realm_maintenance_whitelist_repository::PostgresRealmMaintenanceWhitelistRepository,
         },
         organization::{
+            group_attribute_repository::PostgresGroupAttributeRepository,
+            group_member_repository::PostgresGroupMemberRepository,
+            group_repository::PostgresGroupRepository,
+            group_role_repository::PostgresGroupRoleRepository,
+            group_token_repository::PostgresGroupTokenRepository,
             organization_attribute_repository::PostgresOrganizationAttributeRepository,
             organization_member_repository::PostgresOrganizationMemberRepository,
+            organization_member_role_repository::PostgresOrganizationMemberRoleRepository,
             organization_repository::PostgresOrganizationRepository,
         },
         realm::repositories::{
@@ -87,6 +99,7 @@ use crate::{
             device_auth_repository::PostgresDeviceAuthRepository,
             email_verification_token_repository::PostgresEmailVerificationTokenRepository,
             keystore_repository::PostgresKeyStoreRepository,
+            login_action_token_repository::PostgresLoginActionTokenRepository,
             magic_link_repository::PostgresMagicLinkRepository,
             password_policy_repository::PostgresPasswordPolicyRepository,
             password_reset_token_repository::PostgresPasswordResetTokenRepository,
@@ -98,6 +111,7 @@ use crate::{
         },
         role::repositories::role_postgres_repository::PostgresRoleRepository,
         seawatch::repositories::security_event_postgres_repository::PostgresSecurityEventRepository,
+        trident::repositories::otp_enrollment_repository::PostgresOtpEnrollmentRepository,
         user::{
             repositories::{
                 user_attribute_repository::PostgresUserAttributeRepository,
@@ -131,11 +145,14 @@ pub mod portal_theme;
 pub mod realm;
 pub mod role;
 pub mod seawatch;
+pub mod token_revocation;
 pub mod trident;
 pub mod user;
 pub mod webhook;
 
 pub use services::ApplicationService;
+
+const DEVICE_SESSION_PURGE_PERIOD: std::time::Duration = std::time::Duration::from_secs(900);
 
 pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationService, CoreError> {
     let database_url = format!(
@@ -159,10 +176,13 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
     let hasher = Arc::new(Argon2HasherRepository::new());
     let auth_session = Arc::new(PostgresAuthSessionRepository::new(postgres.get_db()));
     let device_auth = Arc::new(PostgresDeviceAuthRepository::new(postgres.get_db()));
+    let login_action_token = Arc::new(PostgresLoginActionTokenRepository::new(postgres.get_db()));
     let redirect_uri = Arc::new(PostgresRedirectUriRepository::new(postgres.get_db()));
     let post_logout_redirect_uri = Arc::new(PostgresPostLogoutRedirectUriRepository::new(
         postgres.get_db(),
     ));
+    let web_origin = Arc::new(PostgresWebOriginRepository::new(postgres.get_db()));
+    let client_saml = Arc::new(PostgresClientSamlRepository::new(postgres.get_db()));
     let role = Arc::new(PostgresRoleRepository::new(postgres.get_db()));
     let keystore = Arc::new(PostgresKeyStoreRepository::new(postgres.get_db()));
     let user_role = Arc::new(PostgresUserRoleRepository::new(postgres.get_db()));
@@ -174,6 +194,13 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
     let refresh_token = Arc::new(PostgresRefreshTokenRepository::new(postgres.get_db()));
     let access_token = Arc::new(PostgresAccessTokenRepository::new(postgres.get_db()));
     let user_session = Arc::new(PostgresUserSessionRepository::new(postgres.get_db()));
+    let token_revocation = Arc::new(
+        crate::application::token_revocation::TokenRevocationAdapter::new(
+            access_token.clone(),
+            refresh_token.clone(),
+            user_session.clone(),
+        ),
+    );
     let recovery_code = Arc::new(RandBytesRecoveryCodeRepository::new(hasher.clone()));
     let security_event = Arc::new(PostgresSecurityEventRepository::new(postgres.get_db()));
     let identity_provider = Arc::new(PostgresIdentityProviderRepository::new(postgres.get_db()));
@@ -204,6 +231,14 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
     ));
     let organization_member =
         Arc::new(PostgresOrganizationMemberRepository::new(postgres.get_db()));
+    let organization_member_role = Arc::new(PostgresOrganizationMemberRoleRepository::new(
+        postgres.get_db(),
+    ));
+    let group = Arc::new(PostgresGroupRepository::new(postgres.get_db()));
+    let group_member = Arc::new(PostgresGroupMemberRepository::new(postgres.get_db()));
+    let group_role = Arc::new(PostgresGroupRoleRepository::new(postgres.get_db()));
+    let group_attribute = Arc::new(PostgresGroupAttributeRepository::new(postgres.get_db()));
+    let group_token = Arc::new(PostgresGroupTokenRepository::new(postgres.get_db()));
     let email_verification_token_repo = Arc::new(PostgresEmailVerificationTokenRepository::new(
         postgres.get_db(),
     ));
@@ -215,6 +250,7 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
         postgres.get_db(),
     ));
     let password_policy = Arc::new(PostgresPasswordPolicyRepository::new(postgres.get_db()));
+    let otp_enrollment = Arc::new(PostgresOtpEnrollmentRepository::new(postgres.get_db()));
 
     let (compass_tx, compass_rx) = tokio::sync::mpsc::channel(1024);
     tokio::spawn(compass_writer_task(
@@ -262,6 +298,7 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
         organization_member.clone(),
         organization.clone(),
         organization_attribute.clone(),
+        group_token.clone(),
         user_required_action.clone(),
         maintenance_whitelist.clone(),
         realm_maintenance_whitelist.clone(),
@@ -269,6 +306,8 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
         email_verification_service.clone(),
         webhook.clone(),
         security_event.clone(),
+        user_session.clone(),
+        login_action_token.clone(),
         Arc::new(MapperEngine::new()),
         flow_recorder.clone(),
     );
@@ -280,6 +319,11 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
         Arc::new(auth_service.clone()),
         DeviceFlowConfig::default(),
     );
+
+    tokio::spawn(purge_expired_device_sessions_task(
+        device_flow_service.clone(),
+        DEVICE_SESSION_PURGE_PERIOD,
+    ));
 
     let app = ApplicationService {
         maintenance_service: MaintenanceServiceImpl::new(
@@ -300,6 +344,8 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
             webhook.clone(),
             redirect_uri.clone(),
             post_logout_redirect_uri.clone(),
+            web_origin.clone(),
+            client_saml.clone(),
             role.clone(),
             security_event.clone(),
             client_scope.clone(),
@@ -325,6 +371,7 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
             scope_mapping.clone(),
             redirect_uri.clone(),
             policy.clone(),
+            config.webapp_url.clone(),
         ),
         mail_service: MailServiceImpl::new(realm.clone(), smtp_config.clone(), policy.clone()),
         role_service: RoleServiceImpl::new(
@@ -357,6 +404,9 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
             email_template.clone(),
             mjml_renderer.clone(),
             password_policy.clone(),
+            otp_enrollment.clone(),
+            user_role.clone(),
+            token_revocation.clone(),
         ),
         user_service: UserServiceImpl::new(
             realm.clone(),
@@ -370,6 +420,7 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
             webhook.clone(),
             security_event.clone(),
             password_policy.clone(),
+            token_revocation.clone(),
             policy.clone(),
         ),
         webhook_service: WebhookServiceImpl::new(realm.clone(), webhook.clone(), policy.clone()),
@@ -404,6 +455,9 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
             identity_provider.clone(),
             policy.clone(),
             realm.clone(),
+            user.clone(),
+            identity_provider_link.clone(),
+            security_event.clone(),
         ),
         federation_service: FederationServiceImpl::new(
             realm.clone(),
@@ -438,6 +492,7 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
         ),
         scope_mapping_service: ScopeMappingServiceImpl::new(
             realm.clone(),
+            client.clone(),
             client_scope.clone(),
             scope_mapping.clone(),
             policy.clone(),
@@ -460,6 +515,25 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
             organization_member.clone(),
             policy.clone(),
         ),
+        group_service: GroupServiceImpl::new(
+            realm.clone(),
+            user.clone(),
+            user_role.clone(),
+            organization.clone(),
+            group.clone(),
+            group_member.clone(),
+            group_role.clone(),
+            group_attribute.clone(),
+            policy.clone(),
+        ),
+        organization_member_role_service: OrganizationMemberRoleServiceImpl::new(
+            realm.clone(),
+            user_role.clone(),
+            organization.clone(),
+            organization_member.clone(),
+            organization_member_role.clone(),
+            policy.clone(),
+        ),
         flow_recorder,
         db: postgres.get_db(),
         email_verification_service,
@@ -467,7 +541,9 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
             realm.clone(),
             user_session.clone(),
             policy.clone(),
+            token_revocation.clone(),
         ),
+        security_event_repository: security_event.clone(),
     };
 
     Ok(app)
@@ -489,6 +565,8 @@ mod tests {
                 ports::ClientService,
             },
             common::FerriskeyConfig,
+            common::entities::StartupConfig,
+            common::ports::CoreService,
             realm::entities::Realm,
             realm::ports::{RealmRepository, RealmService},
             role::{
@@ -567,6 +645,7 @@ mod tests {
                 name: db_name,
                 schema: schema.clone(),
             },
+            webapp_url: "http://localhost:5555".to_string(),
         })
         .await
         .expect("create service");
@@ -682,6 +761,112 @@ mod tests {
         .expect("count optional mappings");
 
         assert_eq!(optional_count.0, 0);
+
+        admin_pool
+            .execute(format!("DROP SCHEMA IF EXISTS \"{}\" CASCADE", schema).as_str())
+            .await
+            .expect("drop schema");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn seeding_twice_keeps_one_admin_password_and_does_not_rotate_it() {
+        let db_host = env_or("DATABASE_HOST", "localhost");
+        let db_port = env_u16_or("DATABASE_PORT", 5432);
+        let db_name = env_or("DATABASE_NAME", "ferriskey");
+        let db_user = env_or("DATABASE_USER", "ferriskey");
+        let db_password = env_or("DATABASE_PASSWORD", "ferriskey");
+
+        let schema = format!("seed_idempotence_{}", Uuid::new_v4().simple());
+
+        let admin_url = format!(
+            "postgres://{}:{}@{}:{}/{}",
+            db_user, db_password, db_host, db_port, db_name
+        );
+        let admin_pool = sqlx::PgPool::connect(&admin_url)
+            .await
+            .expect("connect admin pool");
+        admin_pool
+            .execute(format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", schema).as_str())
+            .await
+            .expect("create schema");
+
+        let schema_url = format!(
+            "postgres://{}:{}@{}:{}/{}?options=-c search_path={}",
+            db_user,
+            db_password,
+            db_host,
+            db_port,
+            db_name,
+            urlencoding::encode(&schema)
+        );
+        let pool = sqlx::PgPool::connect(&schema_url)
+            .await
+            .expect("connect schema pool");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("run migrations");
+
+        let app = create_service(FerriskeyConfig {
+            database: crate::domain::common::DatabaseConfig {
+                host: db_host,
+                port: db_port,
+                username: db_user,
+                password: db_password,
+                name: db_name,
+                schema: schema.clone(),
+            },
+            webapp_url: "http://localhost:5555".to_string(),
+        })
+        .await
+        .expect("create service");
+
+        let realm_name = format!("realm-{}", Uuid::new_v4().simple());
+        let startup = || StartupConfig {
+            webapp_url: "http://localhost:5555".to_string(),
+            master_realm_name: realm_name.clone(),
+            admin_username: "admin".to_string(),
+            admin_password: "admin".to_string(),
+            admin_email: "admin@test.local".to_string(),
+            default_client_id: "ferriskey-admin".to_string(),
+        };
+
+        app.initialize_application(startup())
+            .await
+            .expect("first seeding");
+
+        let after_first: (uuid::Uuid, String) = sqlx::query_as(
+            "SELECT c.id, c.secret_data FROM credentials c \
+             JOIN users u ON u.id = c.user_id \
+             WHERE u.username = 'admin' AND c.credential_type = 'password'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("exactly one password credential after the first seeding");
+
+        app.initialize_application(startup())
+            .await
+            .expect("second seeding");
+
+        let after_second: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+            "SELECT c.id, c.secret_data FROM credentials c \
+             JOIN users u ON u.id = c.user_id \
+             WHERE u.username = 'admin' AND c.credential_type = 'password'",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("query password credentials");
+
+        assert_eq!(
+            after_second.len(),
+            1,
+            "seeding a second time must not add a password credential"
+        );
+        assert_eq!(
+            after_second[0], after_first,
+            "seeding a second time must leave the stored password untouched"
+        );
 
         admin_pool
             .execute(format!("DROP SCHEMA IF EXISTS \"{}\" CASCADE", schema).as_str())

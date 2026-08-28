@@ -15,6 +15,7 @@ use crate::domain::realm::{
     entities::{Realm, RealmSetting},
     ports::RealmRepository,
 };
+use ferriskey_domain::realm::LoginAliases;
 use tracing::info_span;
 
 #[derive(Debug, Clone)]
@@ -199,6 +200,12 @@ impl RealmRepository for PostgresRealmRepository {
         email_verification_template_id: Option<Option<Uuid>>,
         email_verification_enabled: Option<bool>,
         email_verification_ttl_hours: Option<i64>,
+        lockout_threshold: Option<i32>,
+        lockout_duration_seconds: Option<i32>,
+        login_aliases: Option<LoginAliases>,
+        seawatch_pii_mode: Option<String>,
+        seawatch_pseudo_key: Option<Option<String>>,
+        require_mfa: Option<bool>,
     ) -> Result<RealmSetting, CoreError> {
         let realm_setting = crate::entity::realm_settings::Entity::find()
             .filter(crate::entity::realm_settings::Column::RealmId.eq::<Uuid>(realm_id.into()))
@@ -281,6 +288,31 @@ impl RealmRepository for PostgresRealmRepository {
         if let Some(hours) = email_verification_ttl_hours {
             realm_setting.email_verification_ttl_hours =
                 Set(i32::try_from(hours).map_err(|_| CoreError::Invalid)?);
+        }
+
+        if let Some(threshold) = lockout_threshold {
+            realm_setting.lockout_threshold = Set(threshold);
+        }
+
+        if let Some(duration) = lockout_duration_seconds {
+            realm_setting.lockout_duration_seconds = Set(duration);
+        }
+
+        if let Some(aliases) = login_aliases {
+            realm_setting.login_aliases =
+                Set(aliases.as_slice().iter().map(|a| a.to_string()).collect());
+        }
+
+        if let Some(mode) = seawatch_pii_mode {
+            realm_setting.seawatch_pii_mode = Set(mode);
+        }
+
+        if let Some(key) = seawatch_pseudo_key {
+            realm_setting.seawatch_pseudo_key = Set(key);
+        }
+
+        if let Some(require_mfa) = require_mfa {
+            realm_setting.require_mfa = Set(require_mfa);
         }
 
         let realm_setting = realm_setting

@@ -8,9 +8,11 @@ use uuid::Uuid;
 use crate::domain::{common::entities::app_errors::CoreError, realm::entities::RealmId};
 
 use super::mappers::{
-    audience_mapper::AudienceMapper, hardcoded_claim_mapper::HardcodedClaimMapper,
-    org_detail_mapper::OrgDetailMapper, org_membership_mapper::OrgMembershipMapper,
-    user_attribute_mapper::UserAttributeMapper, user_client_role_mapper::UserClientRoleMapper,
+    audience_mapper::AudienceMapper, group_membership_mapper::GroupMembershipMapper,
+    hardcoded_claim_mapper::HardcodedClaimMapper, org_detail_mapper::OrgDetailMapper,
+    org_membership_mapper::OrgMembershipMapper, user_attribute_mapper::UserAttributeMapper,
+    user_client_role_mapper::UserClientRoleMapper,
+    user_organization_role_mapper::UserOrganizationRoleMapper,
     user_property_mapper::UserPropertyMapper, user_realm_role_mapper::UserRealmRoleMapper,
 };
 
@@ -24,6 +26,27 @@ pub struct ContextOrganization {
     pub domain: Option<String>,
     /// Flat key-value attributes defined on the organization.
     pub attributes: HashMap<String, String>,
+    /// Realm-role names scoped to this organization (member-direct + group-inherited).
+    /// Powers `organizations.<alias>.roles`.
+    pub roles: Vec<String>,
+    /// Client-role names scoped to this organization, keyed by the client's string `client_id`.
+    /// Powers `organizations.<alias>.clients.<client_id>.roles`.
+    pub client_roles: HashMap<String, Vec<String>>,
+}
+
+/// A group the user effectively belongs to (directly or via a descendant), with its full path.
+#[derive(Debug, Clone)]
+pub struct ContextGroup {
+    pub id: Uuid,
+    /// Organization the group is scoped to. Lets the mapper prefix paths with the org alias
+    /// (resolved from `MapperContext::organizations`) to disambiguate multi-org tokens.
+    pub organization_id: Uuid,
+    pub name: String,
+    /// Full path from the root, e.g. `/engineering/backend`.
+    pub path: String,
+    /// `true` when the user is a *direct* member; `false` when this group is present only as an
+    /// ancestor of a direct membership. Lets the group-membership mapper emit direct-only.
+    pub direct: bool,
 }
 
 /// All user/client/realm data that protocol mappers may need.
@@ -47,6 +70,8 @@ pub struct MapperContext {
     pub user_attributes: HashMap<String, Value>,
     /// Organizations the user belongs to, with their attributes pre-loaded.
     pub organizations: Vec<ContextOrganization>,
+    /// Groups the user effectively belongs to (recursive), with full paths.
+    pub groups: Vec<ContextGroup>,
 }
 
 /// Which token the mapper should apply to.
@@ -76,6 +101,8 @@ enum MapperExecutor {
     UserRealmRole(UserRealmRoleMapper),
     OrgMembership(OrgMembershipMapper),
     OrgDetail(OrgDetailMapper),
+    GroupMembership(GroupMembershipMapper),
+    UserOrganizationRole(UserOrganizationRoleMapper),
 }
 
 impl MapperExecutor {
@@ -94,6 +121,8 @@ impl MapperExecutor {
             Self::UserRealmRole(m) => m.execute(config, context, token_type),
             Self::OrgMembership(m) => m.execute(config, context, token_type),
             Self::OrgDetail(m) => m.execute(config, context, token_type),
+            Self::GroupMembership(m) => m.execute(config, context, token_type),
+            Self::UserOrganizationRole(m) => m.execute(config, context, token_type),
         }
     }
 }
@@ -138,6 +167,14 @@ impl MapperEngine {
         executors.insert(
             "oidc-organization-detail-mapper".to_string(),
             MapperExecutor::OrgDetail(OrgDetailMapper),
+        );
+        executors.insert(
+            "oidc-group-membership-mapper".to_string(),
+            MapperExecutor::GroupMembership(GroupMembershipMapper),
+        );
+        executors.insert(
+            "oidc-organization-role-mapper".to_string(),
+            MapperExecutor::UserOrganizationRole(UserOrganizationRoleMapper),
         );
         Self { executors }
     }
@@ -402,6 +439,7 @@ mod tests {
             realm_id: RealmId::new(Uuid::new_v4()),
             user_attributes: HashMap::new(),
             organizations: vec![],
+            groups: vec![],
         };
 
         // Empty mappers should produce empty output
@@ -432,6 +470,7 @@ mod tests {
             realm_id: RealmId::new(Uuid::new_v4()),
             user_attributes: HashMap::new(),
             organizations: vec![],
+            groups: vec![],
         };
 
         let mapper = ProtocolMapper {
@@ -474,6 +513,7 @@ mod tests {
             realm_id: RealmId::new(Uuid::new_v4()),
             user_attributes: HashMap::new(),
             organizations: vec![],
+            groups: vec![],
         };
 
         assert!(context.organizations.is_empty());
@@ -494,6 +534,8 @@ mod tests {
             alias: "acme".to_string(),
             domain: Some("acme.com".to_string()),
             attributes,
+            roles: Vec::new(),
+            client_roles: HashMap::new(),
         };
 
         let context = MapperContext {
@@ -511,6 +553,7 @@ mod tests {
             realm_id: RealmId::new(Uuid::new_v4()),
             user_attributes: HashMap::new(),
             organizations: vec![org],
+            groups: vec![],
         };
 
         assert_eq!(context.organizations.len(), 1);
@@ -540,6 +583,8 @@ mod tests {
                 alias: "org-a".to_string(),
                 domain: None,
                 attributes: HashMap::new(),
+                roles: Vec::new(),
+                client_roles: HashMap::new(),
             },
             ContextOrganization {
                 id: OrganizationId::new(Uuid::new_v4()),
@@ -547,6 +592,8 @@ mod tests {
                 alias: "org-b".to_string(),
                 domain: Some("orgb.io".to_string()),
                 attributes: HashMap::new(),
+                roles: Vec::new(),
+                client_roles: HashMap::new(),
             },
         ];
 
@@ -565,6 +612,7 @@ mod tests {
             realm_id: RealmId::new(Uuid::new_v4()),
             user_attributes: HashMap::new(),
             organizations: orgs,
+            groups: vec![],
         };
 
         assert_eq!(context.organizations.len(), 2);

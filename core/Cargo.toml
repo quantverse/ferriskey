@@ -8,12 +8,17 @@ edition.workspace = true
 [dependencies]
 ferriskey-abyss = { path = "../libs/ferriskey-abyss", features = ["mock"] }
 ferriskey-organization = { path = "../libs/ferriskey-organization", features = ["mock"] }
-ferriskey-domain = { path = "../libs/ferriskey-domain" }
+ferriskey-domain = { path = "../libs/ferriskey-domain", features = ["mock"] }
 ferriskey-security = { path = "../libs/ferriskey-security", features = ["mock"] }
 ferriskey-trident = { path = "../libs/ferriskey-trident" }
-ferriskey-aegis = { path = "../libs/ferriskey-aegis" }
-ferriskey-mail = { path = "../libs/ferriskey-mail" }
+ferriskey-aegis = { path = "../libs/ferriskey-aegis", features = ["mock"] }
+ferriskey-mail = { path = "../libs/ferriskey-mail", features = ["mock"] }
 ferriskey-compass = { path = "../libs/ferriskey-compass" }
+ferriskey-seawatch = { path = "../libs/ferriskey-seawatch", features = ["mock"] }
+ferriskey-password-policy = { path = "../libs/ferriskey-password-policy", features = ["mock"] }
+ferriskey-webhook = { path = "../libs/ferriskey-webhook", features = ["mock"] }
+ferriskey-portal-theme = { path = "../libs/ferriskey-portal-theme", features = ["mock"] }
+ferriskey-portal-layouts = { path = "../libs/ferriskey-portal-layouts", features = ["mock"] }
 ferriskey-migrate = { path = "../libs/ferriskey-migrate" }
 maskass = { path = "../libs/maskass" }
 anyhow = "1.0.98"
@@ -49,7 +54,6 @@ utoipa = { version = "5.4.0", features = ["chrono", "uuid"] }
 tokio = { version = "1.44.1", features = ["rt-multi-thread", "macros"] }
 reqwest = { version = "0.12.23", features = ["json"] }
 mrml = "4"
-regex = "1.11.2"
 futures = "0.3.31"
 webauthn-rs = { version = "0.5.2", features = ["danger-credential-internals", "danger-allow-state-serialisation", "conditional-ui"] }
 ldap3 = "0.12.1"

@@ -1,0 +1,113 @@
+use std::sync::Arc;
+
+use ferriskey_domain::auth::Identity;
+use ferriskey_domain::client::ports::ClientRepository;
+use ferriskey_domain::common::app_errors::CoreError;
+use ferriskey_domain::common::policies::{FerriskeyPolicy, ensure_policy};
+use ferriskey_domain::realm::ports::RealmRepository;
+use ferriskey_domain::user::ports::{UserRepository, UserRoleRepository};
+
+use crate::entities::SecurityEvent;
+use crate::hashing::{VerifyResult, verify_chain};
+use crate::ports::{SecurityEventPolicy, SecurityEventRepository, SecurityEventService};
+use crate::value_objects::{FetchEventsInput, SecurityEventFilter};
+
+#[derive(Clone, Debug)]
+pub struct SecurityEventServiceImpl<R, U, C, UR, SE>
+where
+    R: RealmRepository,
+    U: UserRepository,
+    C: ClientRepository,
+    UR: UserRoleRepository,
+    SE: SecurityEventRepository,
+{
+    pub(crate) realm_repository: Arc<R>,
+    pub(crate) security_event_repository: Arc<SE>,
+    pub(crate) policy: Arc<FerriskeyPolicy<U, C, UR>>,
+}
+
+impl<R, U, C, UR, SE> SecurityEventServiceImpl<R, U, C, UR, SE>
+where
+    R: RealmRepository,
+    U: UserRepository,
+    C: ClientRepository,
+    UR: UserRoleRepository,
+    SE: SecurityEventRepository,
+{
+    pub fn new(
+        realm_repository: Arc<R>,
+        security_event_repository: Arc<SE>,
+        policy: Arc<FerriskeyPolicy<U, C, UR>>,
+    ) -> Self {
+        Self {
+            realm_repository,
+            security_event_repository,
+            policy,
+        }
+    }
+}
+
+impl<R, U, C, UR, SE> SecurityEventService for SecurityEventServiceImpl<R, U, C, UR, SE>
+where
+    R: RealmRepository,
+    U: UserRepository,
+    C: ClientRepository,
+    UR: UserRoleRepository,
+    SE: SecurityEventRepository,
+{
+    async fn fetch_events(
+        &self,
+        identity: Identity,
+        input: FetchEventsInput,
+    ) -> Result<Vec<SecurityEvent>, CoreError> {
+        let realm = self
+            .realm_repository
+            .get_by_name(&input.realm_name)
+            .await
+            .map_err(|_| CoreError::InvalidRealm)?
+            .ok_or(CoreError::InvalidRealm)?;
+
+        let realm_id = realm.id;
+        ensure_policy(
+            self.policy.can_view_events(&identity, &realm).await,
+            "insufficient permissions",
+        )?;
+
+        let security_events = self
+            .security_event_repository
+            .get_events(
+                realm_id,
+                SecurityEventFilter {
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        Ok(security_events)
+    }
+
+    async fn verify_realm_chain(
+        &self,
+        identity: Identity,
+        realm_name: String,
+    ) -> Result<VerifyResult, CoreError> {
+        let realm = self
+            .realm_repository
+            .get_by_name(&realm_name)
+            .await
+            .map_err(|_| CoreError::InvalidRealm)?
+            .ok_or(CoreError::InvalidRealm)?;
+
+        ensure_policy(
+            self.policy.can_view_events(&identity, &realm).await,
+            "insufficient permissions",
+        )?;
+
+        let events = self
+            .security_event_repository
+            .get_events_ordered_for_verification(realm.id)
+            .await?;
+
+        Ok(verify_chain(&events))
+    }
+}

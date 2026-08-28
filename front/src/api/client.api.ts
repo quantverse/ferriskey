@@ -25,6 +25,28 @@ export const useGetClient = ({ realm, clientId }: BaseQuery & { clientId?: strin
   })
 }
 
+export const useGetClientSecret = ({
+  realm,
+  clientId,
+  enabled,
+}: BaseQuery & { clientId?: string; enabled?: boolean }) => {
+  return useQuery({
+    ...window.tanstackApi.get('/realms/{realm_name}/clients/{client_id}/client-secret', {
+      path: {
+        realm_name: realm!,
+        client_id: clientId!,
+      },
+    }).queryOptions,
+    enabled: !!clientId && !!realm && !!enabled,
+    gcTime: 0,
+    staleTime: Infinity,
+    retry: false,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  })
+}
+
 export interface CreateClientMutate {
   realm: string
   payload: CreateClientSchema
@@ -91,6 +113,31 @@ export const useGetClientRoles = ({ realm, clientId }: BaseQuery & { clientId?: 
       },
     }).queryOptions,
     enabled: !!clientId && !!realm,
+  })
+}
+
+export interface EvaluateClientScopesParams {
+  realm: string
+  clientId: string
+  userId: string
+  scope?: string
+}
+
+export const useEvaluateClientScopes = () => {
+  return useMutation({
+    mutationFn: async ({ realm, clientId, userId, scope }: EvaluateClientScopesParams) =>
+      window.tanstackApi
+        .mutation('post', '/realms/{realm_name}/clients/{client_id}/evaluate-scopes')
+        .mutationOptions.mutationFn({
+          path: {
+            realm_name: realm,
+            client_id: clientId,
+          },
+          body: {
+            user_id: userId,
+            scope,
+          },
+        }),
   })
 }
 

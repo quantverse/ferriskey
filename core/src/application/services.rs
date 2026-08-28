@@ -1,6 +1,11 @@
+use std::sync::Arc;
+
 use ferriskey_compass::recorder::FlowRecorder;
 use ferriskey_migrate::{entities::MigrationReport, error::MigrationError};
 use sea_orm::DatabaseConnection;
+
+use crate::domain::authentication::services::client_secret_matches;
+use crate::domain::realm::entities::RealmId;
 
 use crate::{
     application::migrate::{build_runner, context::MigrationContext},
@@ -15,16 +20,23 @@ use crate::{
                 ports::{DeviceFlowService, DeviceTokenIssuer},
                 services::DeviceFlowServiceImpl,
                 value_objects::{
-                    InitiateDeviceFlowInput, InitiateDeviceFlowOutput, InitiateDeviceFlowParams,
-                    PollDeviceTokenParams,
+                    DeviceVerificationPreview, InitiateDeviceFlowInput, InitiateDeviceFlowOutput,
+                    InitiateDeviceFlowParams, PollDeviceTokenParams,
                 },
             },
             entities::{ExchangeTokenInput, JwtToken},
             ports::AuthService,
             services::AuthServiceImpl,
-            value_objects::{GenerateTokensForUserInput, Identity},
+            value_objects::{
+                EvaluateClientScopesInput, EvaluateClientScopesRequest, EvaluateClientScopesResult,
+                GenerateTokensForUserInput, Identity,
+            },
         },
-        client::{ports::ClientRepository, services::ClientServiceImpl},
+        client::{
+            entities::GetClientInput,
+            ports::{ClientRepository, ClientService},
+            services::ClientServiceImpl,
+        },
         common::{
             entities::{InitializationResult, StartupConfig, app_errors::CoreError},
             ports::CoreService,
@@ -36,6 +48,8 @@ use crate::{
         email_verification::services::EmailVerificationServiceImpl,
         health::services::HealthServiceImpl,
         maintenance::services::MaintenanceServiceImpl,
+        organization::group_services::GroupServiceImpl,
+        organization::member_role_services::OrganizationMemberRoleServiceImpl,
         organization::services::OrganizationServiceImpl,
         password_policy::{
             entity::{PasswordPolicy, UpdatePasswordPolicy},
@@ -48,7 +62,11 @@ use crate::{
             services::{MailServiceImpl, RealmServiceImpl},
         },
         role::services::RoleServiceImpl,
-        seawatch::services::SecurityEventServiceImpl,
+        seawatch::{
+            entities::{EventStatus, SecurityEvent, SecurityEventType},
+            ports::SecurityEventRepository,
+            services::SecurityEventServiceImpl,
+        },
         session::{
             entities::UserSession, ports::UserSessionManagementService,
             services::UserSessionManagementServiceImpl,
@@ -69,6 +87,8 @@ use crate::{
             client_postgres_repository::PostgresClientRepository,
             post_logout_redirect_uri_postgres_repository::PostgresPostLogoutRedirectUriRepository,
             redirect_uri_postgres_repository::PostgresRedirectUriRepository,
+            saml_postgres_repository::PostgresClientSamlRepository,
+            web_origin_postgres_repository::PostgresWebOriginRepository,
         },
         compass::repositories::{PostgresCompassFlowRepository, PostgresCompassFlowStepRepository},
         email::SmtpEmailPort,
@@ -82,8 +102,14 @@ use crate::{
             PostgresIdentityProviderRepository, ReqwestOAuthClient,
         },
         organization::{
+            group_attribute_repository::PostgresGroupAttributeRepository,
+            group_member_repository::PostgresGroupMemberRepository,
+            group_repository::PostgresGroupRepository,
+            group_role_repository::PostgresGroupRoleRepository,
+            group_token_repository::PostgresGroupTokenRepository,
             organization_attribute_repository::PostgresOrganizationAttributeRepository,
             organization_member_repository::PostgresOrganizationMemberRepository,
+            organization_member_role_repository::PostgresOrganizationMemberRoleRepository,
             organization_repository::PostgresOrganizationRepository,
         },
         realm::repositories::{
@@ -98,6 +124,7 @@ use crate::{
             device_auth_repository::PostgresDeviceAuthRepository,
             email_verification_token_repository::PostgresEmailVerificationTokenRepository,
             keystore_repository::PostgresKeyStoreRepository,
+            login_action_token_repository::PostgresLoginActionTokenRepository,
             magic_link_repository::PostgresMagicLinkRepository,
             password_reset_token_repository::PostgresPasswordResetTokenRepository,
             portal_layouts_repository::PostgresPortalLayoutsRepository,
@@ -108,6 +135,7 @@ use crate::{
         },
         role::repositories::role_postgres_repository::PostgresRoleRepository,
         seawatch::repositories::security_event_postgres_repository::PostgresSecurityEventRepository,
+        trident::repositories::otp_enrollment_repository::PostgresOtpEnrollmentRepository,
         user::{
             repositories::{
                 user_attribute_repository::PostgresUserAttributeRepository,
@@ -129,12 +157,31 @@ type CredentialRepo = PostgresCredentialRepository;
 type WebhookRepo = PostgresWebhookRepository;
 type RedirectUriRepo = PostgresRedirectUriRepository;
 type PostLogoutRedirectUriRepo = PostgresPostLogoutRedirectUriRepository;
+type WebOriginRepo = PostgresWebOriginRepository;
+type ClientSamlRepo = PostgresClientSamlRepository;
+
+type ApplicationClientService = ClientServiceImpl<
+    RealmRepo,
+    UserRepo,
+    ClientRepo,
+    UserRoleRepo,
+    WebhookRepo,
+    RedirectUriRepo,
+    PostLogoutRedirectUriRepo,
+    WebOriginRepo,
+    ClientSamlRepo,
+    RoleRepo,
+    SecurityEventRepo,
+    ClientScopeRepo,
+    ScopeMappingRepo,
+>;
 type RoleRepo = PostgresRoleRepository;
 type HealthCheckRepo = PostgresHealthCheckRepository;
 type RecoveryCodeRepo = RandBytesRecoveryCodeRepository<10, Argon2HasherRepository>;
 type AuthSessionRepo = PostgresAuthSessionRepository;
 type HasherRepo = Argon2HasherRepository;
 type UserRequiredActionRepo = PostgresUserRequiredActionRepository;
+type OtpEnrollmentRepo = PostgresOtpEnrollmentRepository;
 type UserAttributeRepo = PostgresUserAttributeRepository;
 type KeystoreRepo = PostgresKeyStoreRepository;
 type RefreshTokenRepo = PostgresRefreshTokenRepository;
@@ -161,13 +208,43 @@ type PortalLayoutsRepo = PostgresPortalLayoutsRepository;
 type OrganizationRepo = PostgresOrganizationRepository;
 type OrganizationAttributeRepo = PostgresOrganizationAttributeRepository;
 type OrganizationMemberRepo = PostgresOrganizationMemberRepository;
+type OrganizationMemberRoleRepo = PostgresOrganizationMemberRoleRepository;
+type GroupRepo = PostgresGroupRepository;
+type GroupMemberRepo = PostgresGroupMemberRepository;
+type GroupRoleRepo = PostgresGroupRoleRepository;
+type GroupAttributeRepo = PostgresGroupAttributeRepository;
+type GroupTokenRepo = PostgresGroupTokenRepository;
 type EmailVerificationTokenRepo = PostgresEmailVerificationTokenRepository;
 type UserSessionRepo = PostgresUserSessionRepository;
+
+pub(crate) type ApplicationTokenRevocation =
+    crate::application::token_revocation::TokenRevocationAdapter<
+        AccessTokenRepo,
+        RefreshTokenRepo,
+        UserSessionRepo,
+    >;
 
 type ApplicationUserSessionManagementService = UserSessionManagementServiceImpl<
     RealmRepo,
     UserSessionRepo,
     crate::domain::common::policies::FerriskeyPolicy<UserRepo, ClientRepo, UserRoleRepo>,
+    ApplicationTokenRevocation,
+>;
+
+type ApplicationUserService = UserServiceImpl<
+    RealmRepo,
+    UserRepo,
+    ClientRepo,
+    UserRoleRepo,
+    CredentialRepo,
+    HasherRepo,
+    RoleRepo,
+    UserRequiredActionRepo,
+    WebhookRepo,
+    SecurityEventRepo,
+    UserAttributeRepo,
+    PasswordPolicyRepo,
+    ApplicationTokenRevocation,
 >;
 
 type ApplicationTridentService = TridentServiceImpl<
@@ -187,6 +264,9 @@ type ApplicationTridentService = TridentServiceImpl<
     EmailTemplateRepo,
     MjmlRenderer,
     PasswordPolicyRepo,
+    OtpEnrollmentRepo,
+    UserRoleRepo,
+    ApplicationTokenRevocation,
 >;
 
 type MaintenanceWhitelistRepo = crate::infrastructure::maintenance::repositories::maintenance_whitelist_repository::PostgresMaintenanceWhitelistRepository;
@@ -234,6 +314,7 @@ type ApplicationAuthService = AuthServiceImpl<
     OrganizationMemberRepo,
     OrganizationRepo,
     OrganizationAttributeRepo,
+    GroupTokenRepo,
     UserRequiredActionRepo,
     MaintenanceWhitelistRepo,
     RealmMaintenanceWhitelistRepo,
@@ -241,7 +322,11 @@ type ApplicationAuthService = AuthServiceImpl<
     ApplicationEmailVerificationService,
     WebhookRepo,
     SecurityEventRepo,
+    UserSessionRepo,
+    LoginActionTokenRepo,
 >;
+
+type LoginActionTokenRepo = PostgresLoginActionTokenRepository;
 
 type DeviceAuthRepo = PostgresDeviceAuthRepository;
 
@@ -265,19 +350,7 @@ pub struct ApplicationService {
         SecurityEventServiceImpl<RealmRepo, UserRepo, ClientRepo, UserRoleRepo, SecurityEventRepo>,
     pub(crate) credential_service:
         CredentialServiceImpl<RealmRepo, UserRepo, ClientRepo, UserRoleRepo, CredentialRepo>,
-    pub(crate) client_service: ClientServiceImpl<
-        RealmRepo,
-        UserRepo,
-        ClientRepo,
-        UserRoleRepo,
-        WebhookRepo,
-        RedirectUriRepo,
-        PostLogoutRedirectUriRepo,
-        RoleRepo,
-        SecurityEventRepo,
-        ClientScopeRepo,
-        ScopeMappingRepo,
-    >,
+    pub(crate) client_service: ApplicationClientService,
     pub(crate) realm_service: RealmServiceImpl<
         RealmRepo,
         UserRepo,
@@ -303,20 +376,7 @@ pub struct ApplicationService {
         WebhookRepo,
     >,
     pub(crate) trident_service: ApplicationTridentService,
-    pub(crate) user_service: UserServiceImpl<
-        RealmRepo,
-        UserRepo,
-        ClientRepo,
-        UserRoleRepo,
-        CredentialRepo,
-        HasherRepo,
-        RoleRepo,
-        UserRequiredActionRepo,
-        WebhookRepo,
-        SecurityEventRepo,
-        UserAttributeRepo,
-        PasswordPolicyRepo,
-    >,
+    pub(crate) user_service: ApplicationUserService,
     pub(crate) health_service: HealthServiceImpl<HealthCheckRepo>,
     pub(crate) webhook_service:
         WebhookServiceImpl<RealmRepo, UserRepo, ClientRepo, UserRoleRepo, WebhookRepo>,
@@ -339,6 +399,9 @@ pub struct ApplicationService {
         IdentityProviderRepo,
         crate::domain::common::policies::FerriskeyPolicy<UserRepo, ClientRepo, UserRoleRepo>,
         RealmRepo,
+        UserRepo,
+        IdentityProviderLinkRepo,
+        SecurityEventRepo,
     >,
     pub(crate) federation_service:
         crate::domain::abyss::federation::services::FederationServiceImpl<
@@ -416,11 +479,34 @@ pub struct ApplicationService {
         OrganizationAttributeRepo,
         OrganizationMemberRepo,
     >,
+    pub(crate) group_service: GroupServiceImpl<
+        RealmRepo,
+        UserRepo,
+        ClientRepo,
+        UserRoleRepo,
+        OrganizationRepo,
+        GroupRepo,
+        GroupMemberRepo,
+        GroupRoleRepo,
+        GroupAttributeRepo,
+    >,
+    pub(crate) organization_member_role_service: OrganizationMemberRoleServiceImpl<
+        RealmRepo,
+        UserRepo,
+        ClientRepo,
+        UserRoleRepo,
+        OrganizationRepo,
+        OrganizationMemberRepo,
+        OrganizationMemberRoleRepo,
+    >,
     #[allow(dead_code)]
     pub(crate) flow_recorder: FlowRecorder,
     pub(crate) db: DatabaseConnection,
     pub email_verification_service: ApplicationEmailVerificationService,
     pub(crate) user_session_management_service: ApplicationUserSessionManagementService,
+    /// Held directly so facade methods that are not backed by a single domain
+    /// service (session revocation) can still write to the audit trail.
+    pub(crate) security_event_repository: Arc<SecurityEventRepo>,
 }
 
 impl CoreService for ApplicationService {
@@ -477,14 +563,28 @@ impl ApplicationService {
         realm_name: String,
         password: &str,
     ) -> Result<(), CoreError> {
+        self.validate_password_policy_for_identity(realm_name, password, None, None)
+            .await
+    }
+
+    pub async fn validate_password_policy_for_identity(
+        &self,
+        realm_name: String,
+        password: &str,
+        username: Option<&str>,
+        email: Option<&str>,
+    ) -> Result<(), CoreError> {
         let realm = self
             .realm_service
             .realm_repository
             .get_by_name(&realm_name)
             .await?
             .ok_or(CoreError::InvalidRealm)?;
+
+        let email_local = email.and_then(|value| value.split('@').next());
+
         self.password_policy_service
-            .enforce(realm.id.into(), password)
+            .enforce_for_identity(realm.id.into(), password, username, email_local)
             .await
     }
 
@@ -500,6 +600,47 @@ impl ApplicationService {
             .ok_or(CoreError::InvalidRealm)?;
         self.password_policy_service
             .get_policy_public(realm.id.into())
+            .await
+    }
+
+    /// Preview the token claims a user would receive from a client for a given scope set,
+    /// without issuing (signing/persisting) a token. Backs the "Evaluate" client-scopes tab.
+    ///
+    /// Authorization reuses the client view policy: `get_client_by_id` enforces
+    /// `can_view_client` and returns the resolved client.
+    pub async fn evaluate_client_scopes(
+        &self,
+        identity: Identity,
+        request: EvaluateClientScopesRequest,
+    ) -> Result<EvaluateClientScopesResult, CoreError> {
+        let client = self
+            .client_service
+            .get_client_by_id(
+                identity,
+                GetClientInput {
+                    client_id: request.client_id,
+                    realm_name: request.realm_name.clone(),
+                },
+            )
+            .await?;
+
+        let realm = self
+            .realm_service
+            .realm_repository
+            .get_by_name(&request.realm_name)
+            .await?
+            .ok_or(CoreError::InvalidRealm)?;
+
+        self.auth_service
+            .evaluate_client_scopes(EvaluateClientScopesInput {
+                base_url: request.base_url,
+                realm_id: realm.id,
+                realm_name: realm.name,
+                client_uuid: client.id,
+                client_id: client.client_id,
+                user_id: request.user_id,
+                scope: request.scope,
+            })
             .await
     }
 
@@ -530,13 +671,25 @@ impl ApplicationService {
             .await
             .map_err(|_| DeviceFlowError::InvalidClient)?;
 
+        if !client.public_client
+            && !client_secret_matches(client.secret_str(), input.client_secret.as_deref())
+        {
+            return Err(DeviceFlowError::InvalidClient);
+        }
+
+        let scope = self
+            .auth_service
+            .resolve_scopes_for_client(client.id, input.scope)
+            .await
+            .map_err(|_| DeviceFlowError::InvalidScope)?;
+
         let verification_uri = format!("{base_url}/realms/{}/device", realm.name);
 
         self.device_flow_service
             .initiate(InitiateDeviceFlowParams {
                 realm_id: realm.id,
                 client_id: client.id,
-                scope: input.scope,
+                scope: Some(scope),
                 oauth_device_code_grant_enabled: client.oauth_device_code_grant_enabled,
                 verification_uri,
             })
@@ -575,6 +728,12 @@ impl ApplicationService {
             .await
             .map_err(|_| DeviceFlowError::InvalidClient)?;
 
+        if !client.public_client
+            && !client_secret_matches(client.secret_str(), input.client_secret.as_deref())
+        {
+            return Err(DeviceFlowError::InvalidClient);
+        }
+
         self.device_flow_service
             .poll(PollDeviceTokenParams {
                 device_code,
@@ -586,24 +745,106 @@ impl ApplicationService {
 
     /// Verification page: bind the authenticated user to the device session
     /// identified by `user_code` and mark it approved (RFC 8628 §3.3).
+    pub async fn consume_login_action_token(&self, jti: uuid::Uuid) -> bool {
+        use crate::domain::authentication::ports::LoginActionTokenRepository;
+
+        self.auth_service
+            .login_action_token_repository
+            .consume(jti)
+            .await
+            .unwrap_or(false)
+    }
+
+    pub async fn purge_expired_device_sessions(&self) -> Result<u64, DeviceFlowError> {
+        self.device_flow_service.purge_expired_sessions().await
+    }
+
+    pub async fn describe_device_user_code(
+        &self,
+        realm_name: String,
+        user_code: String,
+        user_realm_id: RealmId,
+    ) -> Result<DeviceVerificationPreview, DeviceFlowError> {
+        let realm_id = self
+            .device_realm_for_actor(&realm_name, user_realm_id)
+            .await?;
+
+        let preview = self
+            .device_flow_service
+            .preview_user_code(user_code, realm_id)
+            .await?;
+
+        let client = self
+            .client_service
+            .client_repository
+            .get_by_id(realm_id, preview.client_id)
+            .await
+            .map_err(|_| DeviceFlowError::InvalidClient)?;
+
+        Ok(DeviceVerificationPreview {
+            client_id: client.client_id,
+            client_name: client.name,
+            scopes: preview
+                .scope
+                .unwrap_or_default()
+                .split_whitespace()
+                .map(str::to_string)
+                .collect(),
+        })
+    }
+
     pub async fn verify_device_user_code(
         &self,
+        realm_name: String,
         user_code: String,
         user_id: uuid::Uuid,
+        user_realm_id: RealmId,
     ) -> Result<(), DeviceFlowError> {
+        let realm_id = self
+            .device_realm_for_actor(&realm_name, user_realm_id)
+            .await?;
+
         self.device_flow_service
-            .verify_user_code(user_code, user_id)
+            .verify_user_code(user_code, user_id, realm_id)
             .await
+    }
+
+    async fn device_realm_for_actor(
+        &self,
+        realm_name: &str,
+        user_realm_id: RealmId,
+    ) -> Result<RealmId, DeviceFlowError> {
+        let realm = self
+            .realm_service
+            .realm_repository
+            .get_by_name(realm_name)
+            .await
+            .map_err(|_| DeviceFlowError::Forbidden)?
+            .ok_or(DeviceFlowError::Forbidden)?;
+
+        if user_realm_id != realm.id {
+            return Err(DeviceFlowError::Forbidden);
+        }
+
+        Ok(realm.id)
     }
 
     /// Verification page: mark the device session identified by `user_code`
     /// as denied.
     pub async fn deny_device_user_code(
         &self,
+        realm_name: String,
         user_code: String,
         user_id: uuid::Uuid,
+        user_realm_id: RealmId,
     ) -> Result<(), DeviceFlowError> {
-        self.device_flow_service.deny(user_code, user_id).await
+        let realm_id = self
+            .device_realm_for_actor(&realm_name, user_realm_id)
+            .await?;
+
+        self.device_flow_service
+            .deny(user_code, user_id, realm_id)
+            .await
     }
 
     pub async fn list_user_sessions(
@@ -624,9 +865,27 @@ impl ApplicationService {
         user_id: uuid::Uuid,
         session_id: uuid::Uuid,
     ) -> Result<(), CoreError> {
-        self.user_session_management_service
-            .revoke_session(identity, realm_name, user_id, session_id)
-            .await
+        let session = self
+            .user_session_management_service
+            .revoke_session(identity.clone(), realm_name, user_id, session_id)
+            .await?;
+
+        // Sessions are hard-deleted, so the audit event is the only lasting trace
+        // of the session having existed and been revoked.
+        self.security_event_repository
+            .store_event(
+                SecurityEvent::new(
+                    session.realm_id.into(),
+                    SecurityEventType::SessionRevoked,
+                    EventStatus::Success,
+                    identity.id(),
+                )
+                .with_target("session".to_string(), session.id, None)
+                .with_context(session.ip_address, session.user_agent, None),
+            )
+            .await?;
+
+        Ok(())
     }
 
     pub async fn run_data_migrations(&self) -> Result<MigrationReport, MigrationError> {

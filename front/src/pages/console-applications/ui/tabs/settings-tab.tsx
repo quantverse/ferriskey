@@ -14,15 +14,18 @@ import { Switch } from '@/components/ui/switch'
 import { Loader2, Plus, Trash2, X } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { inferApplicationType } from '../../types'
+import { DERIVED_ORIGIN_SENTINEL, isWebOriginValue } from '@/lib/web-origin'
 import { Field, Section } from './primitives'
 
 import Client = Schemas.Client
+import WebOrigin = Schemas.WebOrigin
 
 export interface ApplicationSettingsValues {
   name: string
   enabled: boolean
   directAccessGrantsEnabled: boolean
   oauthDeviceCodeGrantEnabled: boolean
+  requirePkce: boolean
   accessTokenLifetime: number | null
   refreshTokenLifetime: number | null
   idTokenLifetime: number | null
@@ -35,6 +38,7 @@ function settingsFromClient(c: Client): ApplicationSettingsValues {
     enabled: c.enabled,
     directAccessGrantsEnabled: c.direct_access_grants_enabled,
     oauthDeviceCodeGrantEnabled: c.oauth_device_code_grant_enabled,
+    requirePkce: c.require_pkce,
     accessTokenLifetime: c.access_token_lifetime ?? null,
     refreshTokenLifetime: c.refresh_token_lifetime ?? null,
     idTokenLifetime: c.id_token_lifetime ?? null,
@@ -52,6 +56,9 @@ interface Props {
   onDelete: () => void
   onAddRedirectUri: (value: string) => void
   onDeleteRedirectUri: (redirectUriId: string) => void
+  webOrigins: WebOrigin[]
+  onAddWebOrigin: (value: string) => Promise<boolean>
+  onDeleteWebOrigin: (webOriginId: string) => void
 }
 
 export default function SettingsTab({
@@ -62,9 +69,13 @@ export default function SettingsTab({
   onDelete,
   onAddRedirectUri,
   onDeleteRedirectUri,
+  webOrigins,
+  onAddWebOrigin,
+  onDeleteWebOrigin,
 }: Props) {
   const [values, setValues] = useState<ApplicationSettingsValues>(() => settingsFromClient(client))
   const [newUri, setNewUri] = useState('')
+  const [newOrigin, setNewOrigin] = useState('')
 
   const baseline = useMemo(() => settingsFromClient(client), [client])
   const hasChanges = useMemo(
@@ -73,7 +84,12 @@ export default function SettingsTab({
   )
 
   const appType = inferApplicationType(client)
-  const showRedirectUris = appType !== 'm2m' && appType !== 'device'
+  // Redirect URIs and PKCE only mean something for the authorization code flow;
+  // m2m (client credentials) and device (RFC 8628) clients never go through it.
+  const usesAuthorizationCode = appType !== 'm2m' && appType !== 'device'
+  // SPAs and native apps ship their code to the end user, so they cannot hold a
+  // secret — PKCE is their only protection against code interception.
+  const isPublicClient = appType === 'spa' || appType === 'native'
 
   const set = <K extends keyof ApplicationSettingsValues>(
     key: K,
@@ -91,6 +107,14 @@ export default function SettingsTab({
     if (!v || !isValidUrl(v)) return
     onAddRedirectUri(v)
     setNewUri('')
+  }
+
+  const handleAddOrigin = async () => {
+    const v = newOrigin.trim()
+    if (!isWebOriginValue(v)) return
+    if (await onAddWebOrigin(v)) {
+      setNewOrigin('')
+    }
   }
 
   return (
@@ -112,7 +136,7 @@ export default function SettingsTab({
         />
       </Section>
 
-      {showRedirectUris && (
+      {usesAuthorizationCode && (
         <Section
           title='Redirect URIs'
           description='Allowed callback URLs FerrisKey may redirect to after sign-in.'
@@ -166,6 +190,64 @@ export default function SettingsTab({
         </Section>
       )}
 
+      {usesAuthorizationCode && (
+        <Section
+          title='Web origins'
+          description='Origins this application may call FerrisKey from in a browser. Enter + to derive them from the redirect URIs above — literal ones only, regex patterns are skipped.'
+        >
+          <div className='flex flex-col gap-2'>
+            {webOrigins.length === 0 && (
+              <p className='text-xs text-muted-foreground'>No web origins registered yet.</p>
+            )}
+            {webOrigins.map((origin) => (
+              <div
+                key={origin.id}
+                className='flex items-center gap-2 rounded-md border border-border bg-background px-3 py-2'
+              >
+                <span className='flex-1 text-sm font-mono truncate'>{origin.value}</span>
+                {origin.value === DERIVED_ORIGIN_SENTINEL && (
+                  <span className='text-xs text-muted-foreground'>derived from redirect URIs</span>
+                )}
+                <button
+                  type='button'
+                  onClick={() => onDeleteWebOrigin(origin.id)}
+                  disabled={uriPending}
+                  className='inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:text-red-500 hover:bg-muted transition-colors disabled:opacity-40'
+                  aria-label='Remove web origin'
+                >
+                  <X className='h-3.5 w-3.5' />
+                </button>
+              </div>
+            ))}
+            <div className='flex items-center gap-2'>
+              <input
+                type='text'
+                value={newOrigin}
+                onChange={(e) => setNewOrigin(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    void handleAddOrigin()
+                  }
+                }}
+                placeholder='https://app.acme.com'
+                aria-label='Web origin'
+                className='flex-1 rounded-md border border-border bg-background px-3 py-2 text-sm font-mono outline-none placeholder:text-muted-foreground focus:border-primary/40 focus:ring-1 focus:ring-primary/30'
+              />
+              <button
+                type='button'
+                onClick={() => void handleAddOrigin()}
+                disabled={uriPending || !isWebOriginValue(newOrigin)}
+                className='inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 text-sm font-medium hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed'
+              >
+                {uriPending ? <Loader2 className='h-3.5 w-3.5 animate-spin' /> : <Plus className='h-3.5 w-3.5' />}
+                Add
+              </button>
+            </div>
+          </div>
+        </Section>
+      )}
+
       <Section title='Grants' description='OAuth grant types this application is allowed to use.'>
         <ToggleRow
           label='Direct access grants'
@@ -180,6 +262,24 @@ export default function SettingsTab({
           onChange={(v) => set('oauthDeviceCodeGrantEnabled', v)}
         />
       </Section>
+
+      {usesAuthorizationCode && (
+        <Section
+          title='Security'
+          description='Hardening options for the authorization code flow.'
+        >
+          <ToggleRow
+            label='Require PKCE'
+            description={
+              isPublicClient
+                ? 'Reject authorization requests without an S256 challenge (RFC 7636). Strongly recommended: this application cannot keep a client secret safe.'
+                : 'Reject authorization requests without an S256 challenge (RFC 7636). The plain method is refused when this is on.'
+            }
+            checked={values.requirePkce}
+            onChange={(v) => set('requirePkce', v)}
+          />
+        </Section>
+      )}
 
       <Section
         title='Token lifetimes'

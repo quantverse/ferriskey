@@ -83,17 +83,20 @@ impl CredentialRepository for PostgresCredentialRepository {
                 hash_result.hash_iterations,
                 hash_result.algorithm.clone(),
             ))
-            .map_err(|_| CredentialError::CreateCredentialError)?),
+            .map_err(|e| {
+                error!("Error serializing credential_data for user {user_id}: {e:?}");
+                CredentialError::CreateCredentialError
+            })?),
             created_at: Set(now.naive_utc()),
             updated_at: Set(now.naive_utc()),
             temporary: Set(Some(temporary)), // Assuming credentials are not temporary by default
             webauthn_credential_id: Set(None),
         };
 
-        let t = payload
-            .insert(&self.db)
-            .await
-            .map_err(|_| CredentialError::CreateCredentialError)?;
+        let t = payload.insert(&self.db).await.map_err(|e| {
+            error!("Error creating credential for user {user_id}: {e:?}");
+            CredentialError::CreateCredentialError
+        })?;
 
         Ok(t.into())
     }
@@ -113,6 +116,22 @@ impl CredentialRepository for PostgresCredentialRepository {
         let credential = credential.ok_or(CredentialError::GetPasswordCredentialError)?;
 
         Ok(credential)
+    }
+
+    async fn has_password_credential(&self, user_id: uuid::Uuid) -> Result<bool, CredentialError> {
+        CredentialEntity::find()
+            .filter(crate::entity::credentials::Column::UserId.eq(user_id))
+            .filter(
+                crate::entity::credentials::Column::CredentialType
+                    .eq(CredentialType::Password.as_str()),
+            )
+            .one(&self.db)
+            .await
+            .map(|credential| credential.is_some())
+            .map_err(|e| {
+                error!("Error checking password credential for user {user_id}: {e:?}");
+                CredentialError::GetPasswordCredentialError
+            })
     }
 
     async fn delete_password_credential(&self, user_id: uuid::Uuid) -> Result<(), CredentialError> {

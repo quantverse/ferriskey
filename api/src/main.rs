@@ -176,6 +176,7 @@ async fn main() -> Result<(), anyhow::Error> {
             admin_username: args.admin.username.clone(),
             default_client_id: "security-admin-console".to_string(),
             master_realm_name: "master".to_string(),
+            webapp_url: args.webapp_url.clone(),
         })
         .await?;
 
@@ -193,7 +194,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
     // Bound the in-memory abuse-control maps (brute-force guard + rate limiter)
     // with a periodic eviction sweep so they cannot grow without bound.
-    crate::application::security::spawn_security_reaper(
+    ferriskey_api_core::security::spawn_security_reaper(
         app_state.brute_force.clone(),
         app_state.rate_limiter.clone(),
     );

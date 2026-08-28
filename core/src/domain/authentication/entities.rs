@@ -1,23 +1,25 @@
-use std::fmt::Display;
-
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 use uuid::Uuid;
 use webauthn_rs::prelude::{
     DiscoverableAuthentication, PasskeyAuthentication, PasskeyRegistration,
 };
 
+use crate::domain::authentication::value_objects::CodeChallengeMethod;
+use crate::domain::common::generate_timestamp;
+use crate::domain::jwt::entities::JwtClaim;
 use crate::domain::realm::entities::RealmId;
-use crate::domain::{
-    authentication::value_objects::{CodeChallengeMethod, Identity},
-    common::generate_timestamp,
-    jwt::entities::JwtClaim,
-    user::entities::RequiredAction,
-};
 
+// Plain OAuth2/OIDC domain types now live in the shared `ferriskey-domain` crate.
+// Re-exported here so existing `crate::domain::authentication::entities::*` call sites keep
+// compiling. Types that depend on `webauthn-rs` (WebAuthnChallenge, AuthSession, ...) or on
+// `ferriskey-security` (AuthorizeRequestInput's JwtClaim) stay in `core` — moving them would
+// pull a heavy crypto crate / an internal crate into the leaf `ferriskey-domain`.
 pub use ferriskey_domain::authentication::entities::{
-    AuthenticationError, JwtToken, RefreshClaims, TokenIntrospectionResponse,
+    AuthCompletion, AuthInput, AuthProtocol, AuthenticateInput, AuthenticateOutput,
+    AuthenticationError, AuthenticationMethod, AuthenticationStepStatus, AuthorizeRequestOutput,
+    CredentialsAuthParams, ExchangeTokenInput, GrantType, JwtToken, RefreshClaims,
+    TokenIntrospectionResponse,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,9 +35,10 @@ pub struct AuthSession {
     pub id: Uuid,
     pub realm_id: RealmId,
     pub client_id: Uuid,
+    pub protocol: AuthProtocol,
     pub redirect_uri: String,
-    pub response_type: String,
-    pub scope: String,
+    pub response_type: Option<String>,
+    pub scope: Option<String>,
     pub state: Option<String>,
     pub nonce: Option<String>,
     pub user_id: Option<Uuid>,
@@ -54,9 +57,10 @@ pub struct AuthSession {
 pub struct AuthSessionParams {
     pub realm_id: RealmId,
     pub client_id: Uuid,
+    pub protocol: AuthProtocol,
     pub redirect_uri: String,
-    pub response_type: String,
-    pub scope: String,
+    pub response_type: Option<String>,
+    pub scope: Option<String>,
     pub state: Option<String>,
     pub nonce: Option<String>,
     pub user_id: Option<Uuid>,
@@ -78,6 +82,7 @@ impl AuthSession {
             id: Uuid::new_v7(timestamp),
             realm_id: params.realm_id,
             client_id: params.client_id,
+            protocol: params.protocol,
             redirect_uri: params.redirect_uri,
             response_type: params.response_type,
             scope: params.scope,
@@ -97,209 +102,13 @@ impl AuthSession {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ToSchema)]
-pub enum GrantType {
-    #[default]
-    #[serde(rename = "authorization_code")]
-    Code,
-
-    #[serde(rename = "password")]
-    Password,
-
-    #[serde(rename = "client_credentials")]
-    Credentials,
-
-    #[serde(rename = "refresh_token")]
-    RefreshToken,
-
-    #[serde(rename = "urn:ietf:params:oauth:grant-type:device_code")]
-    DeviceCode,
-}
-
-impl Display for GrantType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            GrantType::Code => write!(f, "code"),
-            GrantType::Password => write!(f, "password"),
-            GrantType::Credentials => write!(f, "credentials"),
-            GrantType::RefreshToken => write!(f, "refresh_token"),
-            GrantType::DeviceCode => write!(f, "urn:ietf:params:oauth:grant-type:device_code"),
-        }
-    }
-}
-
-pub struct AuthInput {
-    pub client_id: String,
-    pub realm_name: String,
-    pub redirect_uri: String,
-    pub response_type: String,
-    pub scope: Option<String>,
-    pub state: Option<String>,
-    pub nonce: Option<String>,
-    pub code_challenge: Option<String>,
-    pub code_challenge_method: Option<CodeChallengeMethod>,
-}
-
 pub struct AuthOutput {
     pub login_url: String,
     pub session: AuthSession,
 }
 
-pub struct ExchangeTokenInput {
-    pub realm_name: String,
-    pub client_id: String,
-    pub client_secret: Option<String>,
-    pub code: Option<String>,
-    pub username: Option<String>,
-    pub password: Option<String>,
-    pub refresh_token: Option<String>,
-    pub base_url: String,
-    pub grant_type: GrantType,
-    pub scope: Option<String>,
-    /// Set for the `urn:ietf:params:oauth:grant-type:device_code` grant.
-    pub device_code: Option<String>,
-    pub code_verifier: Option<String>,
-}
-
 pub struct AuthorizeRequestInput {
     pub claims: JwtClaim,
     pub token: String,
-}
-
-pub struct AuthorizeRequestOutput {
-    pub identity: Identity,
-}
-
-pub struct AuthenticateInput {
-    pub realm_name: String,
-    pub client_id: String,
-    pub session_code: Uuid,
-    pub base_url: String,
-    pub auth_method: AuthenticationMethod,
-}
-
-impl AuthenticateInput {
-    pub fn with_user_credentials(
-        realm_name: String,
-        client_id: String,
-        session_code: Uuid,
-        base_url: String,
-        username: String,
-        password: String,
-    ) -> Self {
-        Self {
-            realm_name,
-            client_id,
-            session_code,
-            base_url,
-            auth_method: AuthenticationMethod::UserCredentials { username, password },
-        }
-    }
-
-    pub fn with_existing_token(
-        realm_name: String,
-        client_id: String,
-        session_code: Uuid,
-        base_url: String,
-        token: String,
-    ) -> Self {
-        Self {
-            realm_name,
-            client_id,
-            session_code,
-            base_url,
-            auth_method: AuthenticationMethod::ExistingToken { token },
-        }
-    }
-
-    pub fn is_token_refresh(&self) -> bool {
-        matches!(self.auth_method, AuthenticationMethod::ExistingToken { .. })
-    }
-
-    pub fn is_credential_auth(&self) -> bool {
-        matches!(
-            self.auth_method,
-            AuthenticationMethod::UserCredentials { .. }
-        )
-    }
-}
-
-pub struct AuthenticateOutput {
-    pub user_id: Uuid,
-    pub status: AuthenticationStepStatus,
-    pub authorization_code: Option<String>,
-    pub temporary_token: Option<String>,
-    pub required_actions: Vec<RequiredAction>,
-    pub redirect_url: Option<String>,
-    pub session_state: Option<String>,
-}
-
-impl AuthenticateOutput {
-    pub fn complete_with_redirect(
-        user_id: Uuid,
-        authorization_code: String,
-        redirect_url: String,
-    ) -> Self {
-        Self {
-            user_id,
-            status: AuthenticationStepStatus::Success,
-            authorization_code: Some(authorization_code),
-            temporary_token: None,
-            required_actions: Vec::new(),
-            redirect_url: Some(redirect_url),
-            session_state: None,
-        }
-    }
-
-    pub fn requires_actions(
-        user_id: Uuid,
-        required_actions: Vec<RequiredAction>,
-        temporary_token: String,
-    ) -> Self {
-        Self {
-            user_id,
-            status: AuthenticationStepStatus::RequiresActions,
-            authorization_code: None,
-            temporary_token: Some(temporary_token),
-            required_actions,
-            redirect_url: None,
-            session_state: None,
-        }
-    }
-
-    pub fn requires_otp_challenge(user_id: Uuid, temporary_token: String) -> Self {
-        Self {
-            user_id,
-            status: AuthenticationStepStatus::RequiresOtpChallenge,
-            authorization_code: None,
-            temporary_token: Some(temporary_token),
-            required_actions: Vec::new(),
-            redirect_url: None,
-            session_state: None,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct CredentialsAuthParams {
-    pub realm_name: String,
-    pub client_id: String,
-    pub session_code: Uuid,
-    pub base_url: String,
-    pub username: String,
-    pub password: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum AuthenticationStepStatus {
-    Success,
-    RequiresActions,
-    RequiresOtpChallenge,
-    Failed,
-}
-
-#[derive(Debug, Clone)]
-pub enum AuthenticationMethod {
-    UserCredentials { username: String, password: String },
-    ExistingToken { token: String },
+    pub realm_name: Option<String>,
 }

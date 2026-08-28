@@ -1,8 +1,15 @@
 use std::collections::HashMap;
 
-use base64::{Engine, prelude::BASE64_URL_SAFE_NO_PAD};
-use chrono::{DateTime, Utc};
+use base64::{
+    Engine,
+    prelude::{BASE64_STANDARD, BASE64_URL_SAFE_NO_PAD},
+};
+use chrono::{DateTime, Datelike, Utc};
 use jsonwebtoken::{DecodingKey, EncodingKey};
+use rcgen::{
+    CertificateParams, DistinguishedName, DnType, KeyPair as CertificateKeyPair, KeyUsagePurpose,
+    date_time_ymd,
+};
 use rsa::{
     RsaPrivateKey, RsaPublicKey,
     pkcs8::{DecodePublicKey, EncodePrivateKey, EncodePublicKey, LineEnding},
@@ -49,6 +56,14 @@ pub struct JwtClaim {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+
+    /// OIDC session identifier (`sid`): the `user_sessions` row this token was
+    /// issued against. `None` for tokens from flows that establish no SSO
+    /// session — `client_credentials`, and any token minted before this claim
+    /// existed. Consumers must treat a missing `sid` as "not session-bound"
+    /// rather than as an invalid token.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sid: Option<Uuid>,
 
     /// Dynamic claims injected by protocol mappers.
     #[serde(flatten)]
@@ -133,6 +148,7 @@ impl JwtClaim {
             email,
             scope,
             client_id: None,
+            sid: None,
             additional_claims: HashMap::new(),
         }
     }
@@ -159,6 +175,7 @@ impl JwtClaim {
             email: None,
             exp: Some(timestamp + lifetime_seconds),
             client_id: None,
+            sid: None,
             additional_claims: HashMap::new(),
         }
     }
@@ -177,8 +194,16 @@ impl JwtClaim {
             email: claims.email,
             exp: Some(chrono::Utc::now().timestamp() + lifetime_seconds),
             client_id: claims.client_id,
+            sid: claims.sid,
             additional_claims: claims.additional_claims,
         }
+    }
+
+    /// Bind these claims to the SSO session they were issued against, so that
+    /// introspection and refresh can check the session is still alive.
+    pub fn with_session(mut self, sid: Uuid) -> Self {
+        self.sid = Some(sid);
+        self
     }
 
     pub fn is_service_account(&self) -> bool {
@@ -192,13 +217,17 @@ pub struct Jwt {
     pub expires_at: i64,
 }
 
+pub const CERTIFICATE_VALIDITY_YEARS: i32 = 10;
+
 #[derive(Clone)]
 pub struct JwtKeyPair {
     pub id: Uuid,
     pub realm_id: Uuid,
     pub encoding_key: EncodingKey,
     pub decoding_key: DecodingKey,
+    pub private_key: String,
     pub public_key: String,
+    pub certificate: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
@@ -334,6 +363,7 @@ impl JwtKeyPair {
     pub fn from_pem(
         private_pem: &str,
         public_pem: &str,
+        certificate_pem: &str,
         realm_id: Uuid,
         id: Uuid,
     ) -> Result<Self, SecurityError> {
@@ -348,8 +378,52 @@ impl JwtKeyPair {
             realm_id,
             encoding_key,
             decoding_key,
+            private_key: private_pem.to_string(),
             public_key: public_pem.to_string(),
+            certificate: certificate_pem.to_string(),
         })
+    }
+
+    pub fn self_signed_certificate(
+        private_pem: &str,
+        common_name: &str,
+    ) -> Result<String, SecurityError> {
+        let signing_key = CertificateKeyPair::from_pem(private_pem)
+            .map_err(|e| SecurityError::InvalidKey(e.to_string()))?;
+
+        let mut params = CertificateParams::new(vec![common_name.to_string()])
+            .or_else(|_| CertificateParams::new(Vec::new()))
+            .map_err(|e| SecurityError::GenerationError(e.to_string()))?;
+
+        let mut distinguished_name = DistinguishedName::new();
+        distinguished_name.push(DnType::CommonName, common_name);
+        params.distinguished_name = distinguished_name;
+
+        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+
+        let current_year = Utc::now().year();
+        params.not_before = date_time_ymd(current_year - 1, 1, 1);
+        params.not_after = date_time_ymd(current_year + CERTIFICATE_VALIDITY_YEARS, 1, 1);
+
+        let certificate = params
+            .self_signed(&signing_key)
+            .map_err(|e| SecurityError::GenerationError(e.to_string()))?;
+
+        Ok(certificate.pem())
+    }
+
+    pub fn certificate_base64_der(&self) -> Result<String, SecurityError> {
+        let body = self
+            .certificate
+            .lines()
+            .filter(|line| !line.starts_with("-----"))
+            .collect::<String>();
+
+        BASE64_STANDARD
+            .decode(&body)
+            .map_err(|e| SecurityError::ParsingError(e.to_string()))?;
+
+        Ok(body)
     }
 
     pub fn generate() -> Result<(String, String), SecurityError> {
@@ -397,7 +471,110 @@ impl JwtKeyPair {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rsa::pkcs8::EncodePublicKey;
     use uuid::Uuid;
+    use x509_parser::pem::parse_x509_pem;
+
+    #[test]
+    fn certificate_binds_the_existing_realm_key() {
+        let (private_pem, public_pem) = JwtKeyPair::generate().expect("generate realm key");
+        let certificate_pem = JwtKeyPair::self_signed_certificate(&private_pem, "master")
+            .expect("derive certificate");
+
+        let (_, pem) =
+            parse_x509_pem(certificate_pem.as_bytes()).expect("certificate is valid PEM");
+        assert_eq!(pem.label, "CERTIFICATE");
+
+        let certificate = pem.parse_x509().expect("certificate is valid X.509");
+
+        let expected_spki = RsaPublicKey::from_public_key_pem(&public_pem)
+            .expect("realm public key")
+            .to_public_key_der()
+            .expect("realm public key DER");
+
+        assert_eq!(certificate.public_key().raw, expected_spki.as_bytes());
+    }
+
+    #[test]
+    fn certificate_is_self_issued_to_the_realm_and_currently_valid() {
+        let (private_pem, _) = JwtKeyPair::generate().expect("generate realm key");
+        let certificate_pem = JwtKeyPair::self_signed_certificate(&private_pem, "acme-realm")
+            .expect("derive certificate");
+
+        let (_, pem) =
+            parse_x509_pem(certificate_pem.as_bytes()).expect("certificate is valid PEM");
+        let certificate = pem.parse_x509().expect("certificate is valid X.509");
+
+        assert_eq!(certificate.subject().to_string(), "CN=acme-realm");
+        assert_eq!(
+            certificate.subject().to_string(),
+            certificate.issuer().to_string()
+        );
+        assert!(certificate.validity().is_valid());
+    }
+
+    #[test]
+    fn certificate_survives_a_realm_name_that_is_not_a_dns_name() {
+        let (private_pem, _) = JwtKeyPair::generate().expect("generate realm key");
+        let certificate_pem = JwtKeyPair::self_signed_certificate(&private_pem, "réalm dé test")
+            .expect("derive certificate");
+
+        let (_, pem) =
+            parse_x509_pem(certificate_pem.as_bytes()).expect("certificate is valid PEM");
+        let certificate = pem.parse_x509().expect("certificate is valid X.509");
+
+        assert_eq!(certificate.subject().to_string(), "CN=réalm dé test");
+    }
+
+    #[test]
+    fn key_pair_carries_its_private_key_and_certificate() {
+        let (private_pem, public_pem) = JwtKeyPair::generate().expect("generate realm key");
+        let certificate_pem = JwtKeyPair::self_signed_certificate(&private_pem, "master")
+            .expect("derive certificate");
+
+        let key_pair = JwtKeyPair::from_pem(
+            &private_pem,
+            &public_pem,
+            &certificate_pem,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        )
+        .expect("build key pair");
+
+        assert_eq!(key_pair.private_key, private_pem);
+        assert_eq!(key_pair.public_key, public_pem);
+        assert_eq!(key_pair.certificate, certificate_pem);
+    }
+
+    #[test]
+    fn certificate_der_is_the_unarmored_base64_body() {
+        let (private_pem, public_pem) = JwtKeyPair::generate().expect("generate realm key");
+        let certificate_pem = JwtKeyPair::self_signed_certificate(&private_pem, "master")
+            .expect("derive certificate");
+
+        let key_pair = JwtKeyPair::from_pem(
+            &private_pem,
+            &public_pem,
+            &certificate_pem,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        )
+        .expect("build key pair");
+
+        let encoded = key_pair
+            .certificate_base64_der()
+            .expect("encode certificate for metadata");
+
+        assert!(!encoded.contains("-----"));
+        assert!(!encoded.contains('\n'));
+
+        let (_, pem) =
+            parse_x509_pem(certificate_pem.as_bytes()).expect("certificate is valid PEM");
+        assert_eq!(
+            BASE64_STANDARD.decode(&encoded).expect("decode"),
+            pem.contents
+        );
+    }
 
     #[test]
     fn refresh_claims_keep_scope() {
@@ -413,6 +590,81 @@ mod tests {
 
         assert_eq!(claims.typ, ClaimsTyp::Refresh);
         assert_eq!(claims.scope, scope);
+    }
+
+    fn sample_claims() -> JwtClaim {
+        JwtClaim::new(
+            Uuid::new_v4(),
+            "alice".to_string(),
+            "https://issuer".to_string(),
+            vec!["test-realm".to_string()],
+            ClaimsTyp::Bearer,
+            "client-id".to_string(),
+            None,
+            None,
+            DEFAULT_ACCESS_TOKEN_LIFETIME,
+        )
+    }
+
+    #[test]
+    fn claims_carry_no_session_by_default() {
+        assert!(sample_claims().sid.is_none());
+        assert!(
+            JwtClaim::new_refresh_token(
+                Uuid::new_v4(),
+                "https://issuer".to_string(),
+                vec!["test-realm".to_string()],
+                "client-id".to_string(),
+                None,
+                DEFAULT_REFRESH_TOKEN_LIFETIME,
+            )
+            .sid
+            .is_none()
+        );
+    }
+
+    /// `sid` sits next to a `#[serde(flatten)]` field, so a mistake in its
+    /// declaration would silently route it into `additional_claims` instead of
+    /// becoming a real claim. Pin both directions.
+    #[test]
+    fn session_id_round_trips_as_a_top_level_claim() {
+        let sid = Uuid::new_v4();
+        let claims = sample_claims().with_session(sid);
+
+        let encoded = serde_json::to_value(&claims).expect("serialize claims");
+        assert_eq!(
+            encoded.get("sid").and_then(|v| v.as_str()),
+            Some(sid.to_string().as_str())
+        );
+
+        let decoded: JwtClaim = serde_json::from_value(encoded).expect("deserialize claims");
+        assert_eq!(decoded.sid, Some(sid));
+        assert!(
+            !decoded.additional_claims.contains_key("sid"),
+            "`sid` must be a declared claim, not swept into additional_claims"
+        );
+    }
+
+    /// Tokens minted before `sid` existed, and tokens from flows that establish
+    /// no session, must keep deserializing and must not emit an empty `sid`.
+    #[test]
+    fn absent_session_id_is_omitted_and_tolerated() {
+        let encoded = serde_json::to_value(sample_claims()).expect("serialize claims");
+        assert!(encoded.get("sid").is_none());
+
+        let decoded: JwtClaim = serde_json::from_value(encoded).expect("deserialize claims");
+        assert!(decoded.sid.is_none());
+    }
+
+    #[test]
+    fn temporary_token_keeps_its_session_binding() {
+        let sid = Uuid::new_v4();
+        let claims = sample_claims().with_session(sid);
+
+        let temporary = JwtClaim::new_temporary_token(claims, DEFAULT_TEMPORARY_TOKEN_LIFETIME);
+
+        assert_eq!(temporary.typ, ClaimsTyp::Temporary);
+        assert_eq!(temporary.sid, Some(sid));
     }
 
     #[test]

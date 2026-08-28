@@ -14,13 +14,9 @@ mod tests {
 
     use axum::Router;
     use axum_test::TestServer;
-    use ferriskey_api::{
-        application::http::{
-            authentication::router::authentication_routes, server::app_state::AppState,
-            trident::router::trident_routes,
-        },
-        args::Args,
-    };
+    use ferriskey_api_authentication::router::authentication_routes;
+    use ferriskey_api_core::{app_state::AppState, args::Args};
+    use ferriskey_api_trident::router::trident_routes;
     use ferriskey_core::{
         application::create_service,
         domain::common::{
@@ -87,6 +83,7 @@ mod tests {
                 name: db_name,
                 schema: schema.clone(),
             },
+            webapp_url: "http://localhost:5555".to_string(),
         })
         .await
         .expect("create service");
@@ -99,6 +96,7 @@ mod tests {
                 admin_password: "admin".to_string(),
                 admin_email: "admin@test.local".to_string(),
                 default_client_id: "admin-cli".to_string(),
+                webapp_url: "http://localhost:5555".to_string(),
             })
             .await
             .expect("init app");
