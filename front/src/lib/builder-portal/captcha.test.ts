@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { captchaAlignToJustify, captchaTokenFromForm } from './captcha'
+import { captchaAlignToJustify, captchaTokenFromForm } from './captcha.ts'
 
 test('captchaTokenFromForm returns the trimmed token when present', () => {
   const form = new FormData()
