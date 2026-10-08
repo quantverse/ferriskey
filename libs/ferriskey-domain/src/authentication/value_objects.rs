@@ -3,7 +3,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::authentication::entities::{GrantType, JwtToken};
-use crate::realm::RealmId;
+use crate::realm::scope::RealmScope;
 use crate::user::entities::{RequiredAction, User};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -60,9 +60,8 @@ pub struct CreateAuthSessionRequest {
 }
 
 pub struct GrantTypeParams {
-    pub realm_id: RealmId,
+    pub realm: RealmScope,
     pub base_url: String,
-    pub realm_name: String,
     pub client_id: String,
     pub client_secret: Option<String>,
     pub code: Option<String>,
@@ -171,7 +170,7 @@ impl CreateAuthSessionRequest {
 
 pub struct GenerateTokenInput {
     pub base_url: String,
-    pub realm_name: String,
+    pub realm: RealmScope,
     pub user_id: Uuid,
     pub username: String,
     pub firstname: String,
@@ -180,7 +179,6 @@ pub struct GenerateTokenInput {
     pub client_id: String,
     pub client_uuid: Uuid,
     pub email: String,
-    pub realm_id: RealmId,
     pub scope: Option<String>,
     pub access_token_lifetime: i64,
     pub refresh_token_lifetime: i64,
@@ -193,6 +191,9 @@ pub struct GenerateTokenInput {
     /// `sid` claim. `None` for flows that establish no SSO session, such as
     /// `client_credentials`.
     pub session_id: Option<Uuid>,
+    /// When the user last authenticated interactively, as a Unix timestamp:
+    /// the ID token's `auth_time`, which OIDC `max_age` relies on.
+    pub auth_time: Option<i64>,
 }
 
 /// Request received by the application layer for a client-scope evaluation. The application
@@ -211,8 +212,7 @@ pub struct EvaluateClientScopesRequest {
 /// resolved (and authorized) by the caller; this only carries what the claim assembly needs.
 pub struct EvaluateClientScopesInput {
     pub base_url: String,
-    pub realm_id: RealmId,
-    pub realm_name: String,
+    pub realm: RealmScope,
     pub client_uuid: Uuid,
     /// The client's string `client_id` (e.g. `"backend"`), used as the token `azp`.
     pub client_id: String,

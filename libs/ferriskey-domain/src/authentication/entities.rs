@@ -8,6 +8,8 @@ use uuid::Uuid;
 
 use crate::auth::Identity;
 use crate::authentication::value_objects::CodeChallengeMethod;
+use crate::realm::scope::{RealmScope, Scoped};
+use crate::session::entities::UserSession;
 use crate::user::entities::RequiredAction;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -199,7 +201,9 @@ impl Display for GrantType {
 pub const OPENID_CONNECT_PROTOCOL: &str = "openid-connect";
 pub const SAML_PROTOCOL: &str = "saml";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize, ToSchema,
+)]
 pub enum AuthProtocol {
     #[default]
     #[serde(rename = "openid-connect")]
@@ -273,6 +277,9 @@ pub struct AuthInput {
     pub nonce: Option<String>,
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<CodeChallengeMethod>,
+    pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
+    pub prompt_consent: bool,
 }
 
 pub struct ExchangeTokenInput {
@@ -292,6 +299,8 @@ pub struct ExchangeTokenInput {
     /// REQUIRED for the `authorization_code` grant (RFC 6749 §4.1.3): must be
     /// identical to the one sent in the authorization request.
     pub redirect_uri: Option<String>,
+    pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
 }
 
 pub struct AuthorizeRequestOutput {
@@ -314,13 +323,18 @@ impl AuthenticateInput {
         base_url: String,
         username: String,
         password: String,
+        remember_me: bool,
     ) -> Self {
         Self {
             realm_name,
             client_id,
             session_code,
             base_url,
-            auth_method: AuthenticationMethod::UserCredentials { username, password },
+            auth_method: AuthenticationMethod::UserCredentials {
+                username,
+                password,
+                remember_me,
+            },
         }
     }
 
@@ -337,6 +351,23 @@ impl AuthenticateInput {
             session_code,
             base_url,
             auth_method: AuthenticationMethod::ExistingToken { token },
+        }
+    }
+
+    pub fn with_sso_session(
+        realm_name: String,
+        client_id: String,
+        session_code: Uuid,
+        base_url: String,
+        cookie: String,
+        max_age: Option<i64>,
+    ) -> Self {
+        Self {
+            realm_name,
+            client_id,
+            session_code,
+            base_url,
+            auth_method: AuthenticationMethod::SsoSession { cookie, max_age },
         }
     }
 
@@ -362,10 +393,19 @@ pub struct AuthenticateOutput {
     pub completion: Option<AuthCompletion>,
     pub session_state: Option<String>,
     pub email: Option<String>,
+    pub sso_cookie: Option<String>,
+    /// `Max-Age` of `sso_cookie`; `None` makes it a browser-session cookie.
+    pub sso_session_max_age_secs: Option<i64>,
 }
 
 impl AuthenticateOutput {
-    pub fn complete(user_id: Uuid, authorization_code: String, completion: AuthCompletion) -> Self {
+    pub fn complete(
+        user_id: Uuid,
+        authorization_code: String,
+        completion: AuthCompletion,
+        sso_cookie: String,
+        sso_session_max_age_secs: Option<i64>,
+    ) -> Self {
         Self {
             user_id,
             status: AuthenticationStepStatus::Success,
@@ -376,6 +416,8 @@ impl AuthenticateOutput {
             completion: Some(completion),
             session_state: None,
             email: None,
+            sso_cookie: Some(sso_cookie),
+            sso_session_max_age_secs,
         }
     }
 
@@ -394,6 +436,8 @@ impl AuthenticateOutput {
             completion: None,
             session_state: None,
             email: None,
+            sso_cookie: None,
+            sso_session_max_age_secs: None,
         }
     }
 
@@ -412,18 +456,21 @@ impl AuthenticateOutput {
             completion: None,
             session_state: None,
             email,
+            sso_cookie: None,
+            sso_session_max_age_secs: None,
         }
     }
 }
 
 #[derive(Debug)]
 pub struct CredentialsAuthParams {
-    pub realm_name: String,
+    pub realm: RealmScope,
     pub client_id: String,
     pub session_code: Uuid,
     pub base_url: String,
     pub username: String,
     pub password: String,
+    pub remember_me: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -435,9 +482,33 @@ pub enum AuthenticationStepStatus {
 }
 
 #[derive(Debug, Clone)]
+pub enum SsoSessionBinding {
+    Open,
+    Resume {
+        session: Scoped<UserSession>,
+        cookie: String,
+    },
+    Adopt {
+        session: Scoped<UserSession>,
+    },
+}
+
+#[derive(Debug, Clone)]
 pub enum AuthenticationMethod {
-    UserCredentials { username: String, password: String },
-    ExistingToken { token: String },
+    UserCredentials {
+        username: String,
+        password: String,
+        remember_me: bool,
+    },
+    ExistingToken {
+        token: String,
+    },
+    /// `max_age` is the OIDC parameter: refuse a session whose last
+    /// interactive authentication is older than that many seconds.
+    SsoSession {
+        cookie: String,
+        max_age: Option<i64>,
+    },
 }
 
 #[cfg(test)]

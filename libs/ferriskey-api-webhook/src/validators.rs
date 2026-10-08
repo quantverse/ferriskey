@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use ferriskey_core::domain::webhook::entities::retry_policy::RetryPolicyOverride;
 use ferriskey_core::domain::webhook::entities::webhook_trigger::WebhookTrigger;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -20,9 +21,11 @@ pub struct CreateWebhookValidator {
     #[serde(default)]
     pub headers: HashMap<String, String>,
 
-    #[validate(length(min = 1, message = "subscribers is required"))]
     #[serde(default)]
     pub subscribers: Vec<WebhookTrigger>,
+
+    #[serde(default)]
+    pub retry_policy: Option<RetryPolicyOverride>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, ToSchema)]
@@ -37,9 +40,15 @@ pub struct UpdateWebhookValidator {
     #[serde(default)]
     pub endpoint: String,
 
+    /// Omitted keeps the stored headers: the API never returns them, so a
+    /// client editing another field has no way to send them back and would
+    /// otherwise wipe them.
     #[serde(default)]
-    pub headers: HashMap<String, String>,
+    pub headers: Option<HashMap<String, String>>,
 
     #[serde(default)]
     pub subscribers: Vec<WebhookTrigger>,
+
+    #[serde(default)]
+    pub retry_policy: Option<RetryPolicyOverride>,
 }

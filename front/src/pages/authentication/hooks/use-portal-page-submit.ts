@@ -1,22 +1,34 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useNavigate } from 'react-router'
 import { toast } from 'sonner'
 import { AuthenticationStatus } from '@/api/api.interface'
 import {
+  SESSION_EXPIRED_REASON,
   useAuthenticateMutation,
   useRegistrationMutation,
   useResendVerificationEmailMutation,
 } from '@/api/auth.api'
+import { apiErrorMessage, apiErrorReason } from '@/lib/api-error'
 import { useForgotPassword, useResetPassword } from '@/api/password-reset.api'
 import { useSendMagicLink, useSetupOtp, useVerifyOtp } from '@/api/trident.api'
 import { useDeviceVerify } from '@/api/device.api'
+import { useSubmitConsent } from '@/api/consent.api'
 import type { Schemas } from '@/api/api.client'
 import { useAuth } from '@/hooks/use-auth'
+import {
+  approvedScopesForDeny,
+  approvedScopesFromFormData,
+  type ConsentScopeView,
+} from '../utils/consent-decision'
 import { useOAuthParams } from './use-oauth-params'
 import { POST_LOGIN_RETURN_KEY } from '../feature/page-device-verify-feature'
 import { captchaTokenFromForm } from '@/lib/builder-portal/captcha'
+import { AUTH_NAMESPACE, DEVICE_ACTION, type DeviceAction } from '../constants'
 
 export type DeviceVerifyResult = 'approved' | 'denied' | null
+
+const DEFAULT_AUTHENTICATOR_LABEL = 'Authenticator'
 
 /**
  * Returns an `onSubmit(FormData)` handler tailored to the portal page type.
@@ -33,7 +45,10 @@ export type DeviceVerifyResult = 'approved' | 'denied' | null
  */
 export function usePortalPageSubmit(
   pageType: Schemas.PortalPageType,
-  options?: { onFormError?: (message: string | null) => void },
+  options?: {
+    onFormError?: (message: string | null) => void
+    consentOptionalScopes?: ConsentScopeView[]
+  },
 ): {
   onSubmit?: (data: FormData) => void
   /**
@@ -58,8 +73,15 @@ export function usePortalPageSubmit(
   deviceResult?: DeviceVerifyResult
   /** Device-verify only: clears the result so the user can verify another code. */
   onDeviceReset?: () => void
+  onConsentDeny?: (data: FormData) => void
 } {
   const onFormError = options?.onFormError
+  const optionalScopesOption = options?.consentOptionalScopes
+  const consentOptionalScopes = useMemo(
+    () => optionalScopesOption ?? [],
+    [optionalScopesOption],
+  )
+  const { t } = useTranslation(AUTH_NAMESPACE)
   const { realm_name, getAuthParamsFromUrl } = useOAuthParams()
   const navigate = useNavigate()
   const {
@@ -102,7 +124,7 @@ export function usePortalPageSubmit(
       const username = String(data.get('email') ?? data.get('username') ?? '').trim()
       const password = String(data.get('password') ?? '')
       if (!username || !password) {
-        const msg = 'Enter your username and password to continue.'
+        const msg = t('form.login_fields_required')
         onFormError?.(msg)
         return
       }
@@ -120,16 +142,17 @@ export function usePortalPageSubmit(
         {
           // Surface the API error so the page can render its
           // `form_error_banner` block inline (mirrors the React default
-          // theme's red banner). For "Session expired" the mutation
-          // itself toasts with a Reload action — we don't double up.
+          // theme's red banner). An expired login session is already
+          // toasted with a Reload action by the mutation — we don't
+          // double up.
           onError: (error: Error) => {
-            if (/session\s+expired/i.test(error.message)) return
-            onFormError?.(error.message || 'Sign-in failed. Please try again.')
+            if (apiErrorReason(error) === SESSION_EXPIRED_REASON) return
+            onFormError?.(apiErrorMessage(error, t('form.login_failed')))
           },
         },
       )
     },
-    [authenticate, getAuthParamsFromUrl, onFormError, realm_name],
+    [authenticate, getAuthParamsFromUrl, onFormError, realm_name, t],
   )
 
   // Magic-link request: the customised page collects an email and hands it
@@ -149,12 +172,12 @@ export function usePortalPageSubmit(
           body: { email },
         },
         {
-          onSuccess: () => toast.success('Magic link sent — check your inbox.'),
-          onError: () => toast.error('Failed to send magic link'),
+          onSuccess: () => toast.success(t('magic_link.toast.sent')),
+          onError: () => toast.error(t('magic_link.toast.send_failed')),
         },
       )
     },
-    [realm_name, sendMagicLink],
+    [realm_name, sendMagicLink, t],
   )
 
   // Register: mirrors the React `PageRegisterFeature` payload — email,
@@ -195,11 +218,11 @@ export function usePortalPageSubmit(
       const password = String(data.get('password') ?? '')
       const passwordConfirm = String(data.get('password_confirm') ?? '')
       if (passwordConfirm && passwordConfirm !== password) {
-        toast.error('Passwords do not match.')
+        toast.error(t('form.passwords_mismatch'))
         return
       }
       if (!email || !password) {
-        toast.error('Email and password are required.')
+        toast.error(t('form.register_fields_required'))
         return
       }
       registration({
@@ -220,7 +243,7 @@ export function usePortalPageSubmit(
         } as Schemas.RegistrationRequest & { captcha_token?: string },
       })
     },
-    [realm_name, registration],
+    [realm_name, registration, t],
   )
 
   // Verify-email: the only meaningful action from the user is "send me
@@ -239,7 +262,7 @@ export function usePortalPageSubmit(
     (data: FormData) => {
       const email = String(data.get('email') ?? '').trim()
       if (!email) {
-        onFormError?.('Enter your email to receive a reset link.')
+        onFormError?.(t('form.forgot_email_required'))
         return
       }
       onFormError?.(null)
@@ -248,7 +271,7 @@ export function usePortalPageSubmit(
         body: { email },
       })
     },
-    [forgotPassword, onFormError, realm_name],
+    [forgotPassword, onFormError, realm_name, t],
   )
 
   // Reset password: the token is the `token_id` in the URL (set by the
@@ -261,18 +284,18 @@ export function usePortalPageSubmit(
       const password = String(data.get('password') ?? '')
       const passwordConfirm = String(data.get('password_confirm') ?? '')
       if (!password) {
-        onFormError?.('Choose a new password.')
+        onFormError?.(t('form.reset_password_required'))
         return
       }
       if (passwordConfirm && passwordConfirm !== password) {
-        onFormError?.('Passwords do not match.')
+        onFormError?.(t('form.passwords_mismatch'))
         return
       }
       const params = new URLSearchParams(window.location.search)
       const tokenId = params.get('token_id') ?? params.get('token') ?? ''
       const token = params.get('token') ?? ''
       if (!tokenId) {
-        onFormError?.('Reset link is missing or expired. Request a new one.')
+        onFormError?.(t('form.reset_link_missing'))
         return
       }
       onFormError?.(null)
@@ -297,27 +320,28 @@ export function usePortalPageSubmit(
               window.location.href = loginUrl
               return
             }
-            toast.success('Password updated. Sign in with your new password.')
+            toast.success(t('form.reset_succeeded'))
             navigate(`/realms/${realm_name ?? 'master'}/authentication/login`)
           },
           onError: (error: Error) =>
-            onFormError?.(error.message || 'Could not reset password.'),
+            onFormError?.(apiErrorMessage(error, t('form.reset_failed'))),
         },
       )
     },
-    [navigate, onFormError, realm_name, resetPassword],
+    [navigate, onFormError, realm_name, resetPassword, t],
   )
   const verifyEmailSubmit = useCallback(
     () => {
       resendVerification(
         { realm: realm_name ?? 'master' },
         {
-          onSuccess: () => toast.success('Verification email sent. Check your inbox.'),
-          onError: (error) => toast.error(error.message || 'Failed to resend verification email'),
+          onSuccess: () => toast.success(t('form.verification_sent')),
+          onError: (error) =>
+            toast.error(apiErrorMessage(error, t('verify_email.resend_failed'))),
         },
       )
     },
-    [realm_name, resendVerification],
+    [realm_name, resendVerification, t],
   )
 
   // Device verify (RFC 8628): approve is the form submit, deny is the
@@ -330,13 +354,13 @@ export function usePortalPageSubmit(
   const [deviceResult, setDeviceResult] = useState<DeviceVerifyResult>(null)
   const deviceRedirectingToLogin = useRef(false)
   const runDeviceVerify = useCallback(
-    async (data: FormData, action: 'approve' | 'deny') => {
+    async (data: FormData, action: DeviceAction) => {
       const raw = String(data.get('user_code') ?? '')
         .trim()
         .toUpperCase()
         .replace('-', '')
       if (raw.length !== 8) {
-        onFormError?.('Enter the 8-character code shown on your device.')
+        onFormError?.(t('form.device_code_required'))
         return
       }
       const userCode = `${raw.slice(0, 4)}-${raw.slice(4)}`
@@ -348,11 +372,7 @@ export function usePortalPageSubmit(
         })
         setDeviceResult(response.status === 'denied' ? 'denied' : 'approved')
       } catch (err) {
-        const error = err as {
-          status?: number
-          data?: { error_description?: string; redirect_uri?: string }
-          message?: string
-        }
+        const error = err as { status?: number; data?: { redirect_uri?: string } }
         if (error.status === 401) {
           if (deviceRedirectingToLogin.current) return
           deviceRedirectingToLogin.current = true
@@ -371,24 +391,20 @@ export function usePortalPageSubmit(
           })
           return
         }
-        const description =
-          error.data?.error_description ??
-          error.message ??
-          'Unable to verify this code. Please try again.'
-        onFormError?.(description)
+        onFormError?.(apiErrorMessage(err, t('device.failed')))
       }
     },
-    [navigate, onFormError, realm_name, verifyDevice],
+    [navigate, onFormError, realm_name, verifyDevice, t],
   )
   const deviceApproveSubmit = useCallback(
     (data: FormData) => {
-      void runDeviceVerify(data, 'approve')
+      void runDeviceVerify(data, DEVICE_ACTION.APPROVE)
     },
     [runDeviceVerify],
   )
   const deviceDenySubmit = useCallback(
     (data: FormData) => {
-      void runDeviceVerify(data, 'deny')
+      void runDeviceVerify(data, DEVICE_ACTION.DENY)
     },
     [runDeviceVerify],
   )
@@ -461,9 +477,9 @@ export function usePortalPageSubmit(
   const totpSetupSubmit = useCallback(
     (data: FormData) => {
       const code = String(data.get('totp') ?? '').trim()
-      const label = String(data.get('device_name') ?? '').trim() || 'Authenticator'
+      const label = String(data.get('device_name') ?? '').trim() || DEFAULT_AUTHENTICATOR_LABEL
       if (!code) {
-        toast.error('Enter the 6-digit code from your authenticator app.')
+        toast.error(t('form.otp_code_required'))
         return
       }
       // The secret is no longer sent: the server reads back the enrolment it issued
@@ -474,13 +490,49 @@ export function usePortalPageSubmit(
           realm: realm_name,
         },
         {
-          onError: () =>
-            toast.error('Code didn\u2019t match — try the latest one from your app.'),
+          onError: () => toast.error(t('form.otp_code_mismatch')),
         },
       )
     },
-    [realm_name, verifyOtp],
+    [realm_name, verifyOtp, t],
   )
+
+  const { mutate: submitConsentDecision, isPending: isSubmittingConsentDecision } =
+    useSubmitConsent()
+  const runConsentSubmit = useCallback(
+    (approvedScopes: string[]) => {
+      const consentToken =
+        new URLSearchParams(window.location.search).get('consent_token') ?? ''
+      if (!consentToken) {
+        onFormError?.(t('form.consent_token_missing'))
+        return
+      }
+      onFormError?.(null)
+      submitConsentDecision(
+        {
+          path: { realm_name: realm_name ?? 'master' },
+          body: { consent_token: consentToken, approved_scopes: approvedScopes },
+        },
+        {
+          onSuccess: (response) => {
+            window.location.href = response.redirect_url
+          },
+          onError: (error) =>
+            onFormError?.(apiErrorMessage(error, t('form.consent_failed'))),
+        },
+      )
+    },
+    [onFormError, realm_name, submitConsentDecision, t],
+  )
+  const consentAllowSubmit = useCallback(
+    (data: FormData) => {
+      runConsentSubmit(approvedScopesFromFormData(consentOptionalScopes, data))
+    },
+    [consentOptionalScopes, runConsentSubmit],
+  )
+  const consentDenySubmit = useCallback(() => {
+    runConsentSubmit(approvedScopesForDeny())
+  }, [runConsentSubmit])
 
   // All hooks above run unconditionally so the order stays stable across
   // renders. We only branch on `pageType` *here*, at the return level, to
@@ -517,6 +569,13 @@ export function usePortalPageSubmit(
       deviceResult,
       onDeviceReset: deviceReset,
       isSubmitting: isVerifyingDevice,
+    }
+  }
+  if (pageType === 'consent') {
+    return {
+      onSubmit: consentAllowSubmit,
+      onConsentDeny: consentDenySubmit,
+      isSubmitting: isSubmittingConsentDecision,
     }
   }
 

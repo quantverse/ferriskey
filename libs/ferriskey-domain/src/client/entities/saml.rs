@@ -13,6 +13,7 @@ use uuid::Uuid;
 use crate::common::app_errors::CoreError;
 use crate::generate_timestamp;
 use crate::realm::RealmId;
+use crate::realm::scope::RealmOwned;
 
 pub const MAX_SP_ENTITY_ID_LENGTH: usize = 1024;
 pub const MAX_ACS_URL_LENGTH: usize = 2048;
@@ -59,6 +60,9 @@ pub enum InvalidSamlConfig {
 
     #[error("`{0}` is not a supported name id format")]
     UnsupportedNameIdFormat(String),
+
+    #[error("a saml configuration only belongs to a saml client, this one speaks `{0}`")]
+    ClientIsNotSaml(String),
 }
 
 impl From<InvalidSamlConfig> for CoreError {
@@ -640,6 +644,12 @@ impl ClientSamlConfig {
             created_at: now,
             updated_at: now,
         }
+    }
+}
+
+impl RealmOwned for ClientSamlConfig {
+    fn realm_id(&self) -> RealmId {
+        self.realm_id
     }
 }
 

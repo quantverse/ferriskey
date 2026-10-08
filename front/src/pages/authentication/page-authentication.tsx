@@ -11,10 +11,12 @@ import PageMagicLinkRequestFeature from './feature/page-magic-link-request-featu
 import PageEmailVerifiedFeature from './feature/page-email-verified-feature'
 import PageCheckYourEmail from './feature/page-check-your-email'
 import PageDeviceVerifyFeature from './feature/page-device-verify-feature'
+import PageConsentFeature from './feature/page-consent-feature'
 import VerifyEmailRoute from './feature/verify-email-route'
 import { PortalLayoutWrapper } from './components/portal-layout-wrapper'
 import type { Schemas } from '@/api/api.client'
 import type { ReactNode } from 'react'
+import { PORTAL_PAGE_TYPE } from './constants'
 
 function Portal({
   pageType,
@@ -32,7 +34,7 @@ export default function PageAuthentication() {
       <Route
         path='/login'
         element={
-          <Portal pageType='login'>
+          <Portal pageType={PORTAL_PAGE_TYPE.LOGIN}>
             <PageLoginFeature />
           </Portal>
         }
@@ -40,7 +42,7 @@ export default function PageAuthentication() {
       <Route
         path='/register'
         element={
-          <Portal pageType='register'>
+          <Portal pageType={PORTAL_PAGE_TYPE.REGISTER}>
             <PageRegisterFeature />
           </Portal>
         }
@@ -48,7 +50,7 @@ export default function PageAuthentication() {
       <Route
         path='/otp'
         element={
-          <Portal pageType='totp'>
+          <Portal pageType={PORTAL_PAGE_TYPE.TOTP}>
             <PageOtpChallengeFeature />
           </Portal>
         }
@@ -56,7 +58,7 @@ export default function PageAuthentication() {
       <Route
         path='/forgot-password'
         element={
-          <Portal pageType='forgot_password'>
+          <Portal pageType={PORTAL_PAGE_TYPE.FORGOT_PASSWORD}>
             <PageForgotPasswordFeature />
           </Portal>
         }
@@ -64,7 +66,7 @@ export default function PageAuthentication() {
       <Route
         path='/reset-password'
         element={
-          <Portal pageType='reset_password'>
+          <Portal pageType={PORTAL_PAGE_TYPE.RESET_PASSWORD}>
             <PageResetPasswordFeature />
           </Portal>
         }
@@ -72,7 +74,7 @@ export default function PageAuthentication() {
       <Route
         path='/magic-link'
         element={
-          <Portal pageType='magic_link_verify'>
+          <Portal pageType={PORTAL_PAGE_TYPE.MAGIC_LINK_VERIFY}>
             <PageMagicLinkVerifyFeature />
           </Portal>
         }
@@ -97,7 +99,7 @@ export default function PageAuthentication() {
       <Route
         path='/email-verified'
         element={
-          <Portal pageType='email_verified'>
+          <Portal pageType={PORTAL_PAGE_TYPE.EMAIL_VERIFIED}>
             <PageEmailVerifiedFeature />
           </Portal>
         }
@@ -110,7 +112,7 @@ export default function PageAuthentication() {
       <Route
         path='/magic-link-request'
         element={
-          <Portal pageType='magic_link_request'>
+          <Portal pageType={PORTAL_PAGE_TYPE.MAGIC_LINK_REQUEST}>
             <PageMagicLinkRequestFeature />
           </Portal>
         }
@@ -126,8 +128,16 @@ export default function PageAuthentication() {
       <Route
         path='/device'
         element={
-          <Portal pageType='device_verify'>
+          <Portal pageType={PORTAL_PAGE_TYPE.DEVICE_VERIFY}>
             <PageDeviceVerifyFeature />
+          </Portal>
+        }
+      />
+      <Route
+        path='/consent'
+        element={
+          <Portal pageType={PORTAL_PAGE_TYPE.CONSENT}>
+            <PageConsentFeature />
           </Portal>
         }
       />
@@ -139,7 +149,7 @@ export default function PageAuthentication() {
       <Route
         path='/check-your-email'
         element={
-          <Portal pageType='verify_email'>
+          <Portal pageType={PORTAL_PAGE_TYPE.VERIFY_EMAIL}>
             <PageCheckYourEmail />
           </Portal>
         }

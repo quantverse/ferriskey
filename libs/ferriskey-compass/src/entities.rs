@@ -1,10 +1,15 @@
 use std::fmt::Display;
 
 use chrono::{DateTime, Utc};
-use ferriskey_domain::{generate_uuid_v7, realm::RealmId};
+use ferriskey_domain::{
+    generate_uuid_v7,
+    realm::{RealmId, scope::RealmOwned},
+};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
+
+use crate::value_objects::StepOutcome;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct FlowId(pub Uuid);
@@ -130,6 +135,18 @@ pub enum FlowStepName {
 
     #[serde(rename = "finalize")]
     Finalize,
+
+    #[serde(rename = "saml_authn_request")]
+    SamlAuthnRequest,
+
+    #[serde(rename = "saml_assertion")]
+    SamlAssertion,
+
+    /// An RFC 8693 exchange: a subject token traded for a narrower one.
+    /// Distinct from `TokenExchange`, which is the token endpoint issuing
+    /// tokens for any grant.
+    #[serde(rename = "subject_token_exchange")]
+    SubjectTokenExchange,
 }
 
 impl Display for FlowStepName {
@@ -142,6 +159,9 @@ impl Display for FlowStepName {
             FlowStepName::IdpRedirect => write!(f, "idp_redirect"),
             FlowStepName::IdpCallback => write!(f, "idp_callback"),
             FlowStepName::Finalize => write!(f, "finalize"),
+            FlowStepName::SamlAuthnRequest => write!(f, "saml_authn_request"),
+            FlowStepName::SamlAssertion => write!(f, "saml_assertion"),
+            FlowStepName::SubjectTokenExchange => write!(f, "subject_token_exchange"),
         }
     }
 }
@@ -187,6 +207,12 @@ impl CompassFlow {
     }
 }
 
+impl RealmOwned for CompassFlow {
+    fn realm_id(&self) -> RealmId {
+        self.realm_id
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
 pub struct CompassFlowStep {
     pub id: FlowStepId,
@@ -196,6 +222,7 @@ pub struct CompassFlowStep {
     pub duration_ms: Option<i64>,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
+    pub details: Option<serde_json::Value>,
     pub started_at: DateTime<Utc>,
 }
 
@@ -203,20 +230,18 @@ impl CompassFlowStep {
     pub fn new(
         flow_id: FlowId,
         step_name: FlowStepName,
-        status: StepStatus,
-        duration_ms: Option<i64>,
-        error_code: Option<String>,
-        error_message: Option<String>,
+        outcome: StepOutcome,
         started_at: DateTime<Utc>,
     ) -> Self {
         Self {
             id: FlowStepId::new(),
             flow_id,
             step_name,
-            status,
-            duration_ms,
-            error_code,
-            error_message,
+            status: outcome.status,
+            duration_ms: outcome.duration_ms,
+            error_code: outcome.error_code,
+            error_message: outcome.error_message,
+            details: outcome.details,
             started_at,
         }
     }

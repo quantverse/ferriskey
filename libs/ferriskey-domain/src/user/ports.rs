@@ -6,13 +6,16 @@ use uuid::Uuid;
 
 use crate::auth::Identity;
 use crate::common::app_errors::CoreError;
+use crate::realm::scope::{Scoped, Unscoped};
 use crate::realm::{Realm, RealmId};
+use crate::role::commands::GetUserRolesInput;
 use crate::role::entities::Role;
 use crate::role::permission::Permissions;
 use crate::user::commands::{
     AssignRoleInput, BulkDeleteUsersInput, CreateUserInput, DeleteUserAttributeInput,
-    GetUserAttributesInput, GetUserInput, GetUserPermissionsInput, ResetPasswordInput,
-    SetUserAttributesInput, UnassignRoleInput, UpdateUserInput,
+    GetOwnProfileInput, GetUserAttributesInput, GetUserInput, GetUserPermissionsInput,
+    ImportPasswordCredentialInput, ResetPasswordInput, SetUserAttributesInput, UnassignRoleInput,
+    UpdateOwnLocaleInput, UpdateOwnProfileInput, UpdateUserInput,
 };
 use crate::user::entities::{RequiredAction, RequiredActionError, User, UserAttribute};
 use crate::user::value_objects::{CreateUserRequest, UpdateUserRequest};
@@ -34,6 +37,11 @@ pub trait UserService: Send + Sync {
         &self,
         identity: Identity,
         input: ResetPasswordInput,
+    ) -> impl Future<Output = Result<(), CoreError>> + Send;
+    fn import_password_credential(
+        &self,
+        identity: Identity,
+        input: ImportPasswordCredentialInput,
     ) -> impl Future<Output = Result<(), CoreError>> + Send;
     fn get_users(
         &self,
@@ -60,6 +68,29 @@ pub trait UserService: Send + Sync {
         identity: Identity,
         input: GetUserInput,
     ) -> impl Future<Output = Result<User, CoreError>> + Send;
+
+    /// The caller's own profile. `identity` is the only source of the target
+    /// user id — there is no user id parameter to spoof.
+    fn get_own_profile(
+        &self,
+        identity: Identity,
+        input: GetOwnProfileInput,
+    ) -> impl Future<Output = Result<User, CoreError>> + Send;
+
+    /// Edit the caller's own profile. Same identity guarantee as
+    /// `get_own_profile`. Renaming (`username`) additionally requires the
+    /// realm to have `edit_username_enabled` set.
+    fn update_own_profile(
+        &self,
+        identity: Identity,
+        input: UpdateOwnProfileInput,
+    ) -> impl Future<Output = Result<User, CoreError>> + Send;
+
+    fn update_own_locale(
+        &self,
+        identity: Identity,
+        input: UpdateOwnLocaleInput,
+    ) -> impl Future<Output = Result<User, CoreError>> + Send;
     fn unassign_role(
         &self,
         identity: Identity,
@@ -70,6 +101,12 @@ pub trait UserService: Send + Sync {
         identity: Identity,
         input: GetUserPermissionsInput,
     ) -> impl Future<Output = Result<Vec<Permissions>, CoreError>> + Send;
+
+    fn get_user_roles(
+        &self,
+        identity: Identity,
+        input: GetUserRolesInput,
+    ) -> impl Future<Output = Result<Vec<Role>, CoreError>> + Send;
 
     fn get_user_attributes(
         &self,
@@ -119,9 +156,12 @@ pub trait UserRepository: Send + Sync {
     fn get_by_client_id(
         &self,
         client_id: Uuid,
-    ) -> impl Future<Output = Result<User, CoreError>> + Send;
+    ) -> impl Future<Output = Result<Unscoped<User>, CoreError>> + Send;
 
-    fn get_by_id(&self, user_id: Uuid) -> impl Future<Output = Result<User, CoreError>> + Send;
+    fn get_by_id(
+        &self,
+        user_id: Uuid,
+    ) -> impl Future<Output = Result<Unscoped<User>, CoreError>> + Send;
 
     fn find_by_realm_id(
         &self,
@@ -140,12 +180,21 @@ pub trait UserRepository: Send + Sync {
         ids: Vec<Uuid>,
     ) -> impl Future<Output = Result<u64, CoreError>> + Send;
 
-    fn delete_user(&self, user_id: Uuid) -> impl Future<Output = Result<u64, CoreError>> + Send;
+    fn delete_user(
+        &self,
+        user: &Scoped<User>,
+    ) -> impl Future<Output = Result<u64, CoreError>> + Send;
 
     fn update_user(
         &self,
-        user_id: Uuid,
+        user: &Scoped<User>,
         dto: UpdateUserRequest,
+    ) -> impl Future<Output = Result<User, CoreError>> + Send;
+
+    fn update_locale(
+        &self,
+        user: &Scoped<User>,
+        locale: Option<String>,
     ) -> impl Future<Output = Result<User, CoreError>> + Send;
 
     fn increment_failed_login_attempts(
@@ -159,7 +208,10 @@ pub trait UserRepository: Send + Sync {
         user_id: Uuid,
     ) -> impl Future<Output = Result<(), CoreError>> + Send;
 
-    fn unlock_user(&self, user_id: Uuid) -> impl Future<Output = Result<(), CoreError>> + Send;
+    fn unlock_user(
+        &self,
+        user: &Scoped<User>,
+    ) -> impl Future<Output = Result<(), CoreError>> + Send;
 }
 
 #[cfg_attr(any(test, feature = "mock"), mockall::automock)]

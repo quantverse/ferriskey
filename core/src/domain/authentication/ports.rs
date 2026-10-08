@@ -4,14 +4,14 @@ use crate::domain::authentication::value_objects::{
     EndSessionInput, EndSessionOutput, GenerateTokensForUserInput, GetUserInfoInput, Identity,
     IntrospectTokenInput, RevokeTokenInput, UserInfoResponse,
 };
-use crate::domain::realm::entities::RealmId;
+use crate::domain::realm::entities::{RealmScope, Scoped, Unscoped};
 use crate::domain::{
     authentication::{
         entities::{
             AuthCompletion, AuthInput, AuthOutput, AuthSession, AuthenticateInput,
             AuthenticateOutput, AuthenticationError, AuthorizeRequestInput, AuthorizeRequestOutput,
-            CredentialsAuthParams, ExchangeTokenInput, JwtToken, TokenIntrospectionResponse,
-            WebAuthnChallenge,
+            CredentialsAuthParams, ExchangeTokenInput, JwtToken, SsoSessionBinding,
+            TokenIntrospectionResponse, WebAuthnChallenge,
         },
         value_objects::{
             AuthenticationResult, CreateAuthSessionRequest, GrantTypeParams, RegisterUserInput,
@@ -20,6 +20,7 @@ use crate::domain::{
     },
     common::entities::app_errors::CoreError,
     jwt::entities::JwkKey,
+    user::entities::User,
 };
 
 // `GrantTypeService` now lives in `ferriskey-domain` (its signature touches only plain types).
@@ -59,11 +60,11 @@ pub trait AuthSessionRepository: Send + Sync {
     fn get_by_session_code(
         &self,
         session_code: Uuid,
-    ) -> impl Future<Output = Result<AuthSession, AuthenticationError>> + Send;
+    ) -> impl Future<Output = Result<Unscoped<AuthSession>, AuthenticationError>> + Send;
     fn get_by_code(
         &self,
         code: String,
-    ) -> impl Future<Output = Result<Option<AuthSession>, AuthenticationError>> + Send;
+    ) -> impl Future<Output = Result<Option<Unscoped<AuthSession>>, AuthenticationError>> + Send;
     fn update_code_and_user_id(
         &self,
         session_code: Uuid,
@@ -100,8 +101,45 @@ pub trait AuthSessionRepository: Send + Sync {
 
     fn update_authenticated(
         &self,
-        session_code: Uuid,
+        auth_session: &Scoped<AuthSession>,
         authenticated: bool,
+    ) -> impl Future<Output = Result<(), AuthenticationError>> + Send;
+
+    fn bind_user_session(
+        &self,
+        session_code: Uuid,
+        user_session_id: Uuid,
+    ) -> impl Future<Output = Result<(), AuthenticationError>> + Send;
+
+    /// Remember the live SSO session a login should re-authenticate into.
+    fn set_reauth_session(
+        &self,
+        session_code: Uuid,
+        user_session_id: Uuid,
+    ) -> impl Future<Output = Result<(), AuthenticationError>> + Send;
+
+    /// Record the "remember me" choice made at the first step of a login.
+    fn set_remember_me(
+        &self,
+        session_code: Uuid,
+        remember_me: bool,
+    ) -> impl Future<Output = Result<(), AuthenticationError>> + Send;
+
+    fn set_consent_token_hash(
+        &self,
+        session_code: Uuid,
+        consent_token_hash: String,
+    ) -> impl Future<Output = Result<(), AuthenticationError>> + Send;
+
+    fn get_by_consent_token_hash(
+        &self,
+        consent_token_hash: String,
+    ) -> impl Future<Output = Result<Option<Unscoped<AuthSession>>, AuthenticationError>> + Send;
+
+    fn clear_consent_token_hash(
+        &self,
+        session_code: Uuid,
+        consent_token_hash: String,
     ) -> impl Future<Output = Result<(), AuthenticationError>> + Send;
 }
 
@@ -155,6 +193,25 @@ pub trait AuthService: Send + Sync {
         &self,
         input: GenerateTokensForUserInput,
     ) -> impl Future<Output = Result<JwtToken, CoreError>> + Send;
+
+    /// When `/auth` sends a browser to the login page while its `FERRISKEY_SSO`
+    /// cookie still names a live session, remember that session on the
+    /// authorization request so the login re-authenticates into it. Returns
+    /// whether the cookie named a live session, so the caller keeps it.
+    fn remember_reauthentication(
+        &self,
+        realm_name: String,
+        session_code: Uuid,
+        cookie: String,
+    ) -> impl Future<Output = Result<bool, CoreError>> + Send;
+
+    /// The user behind a `FERRISKEY_SSO` cookie in `realm_name`, for the
+    /// browser endpoints that act as the signed-in user outside a login flow.
+    fn resolve_sso_user(
+        &self,
+        realm_name: String,
+        cookie: String,
+    ) -> impl Future<Output = Result<User, CoreError>> + Send;
 }
 
 /// A strategy for handling different OAuth2 grant types during authentication.
@@ -185,7 +242,7 @@ pub trait AuthenticatePort: Send + Sync {
     fn handle_token_refresh(
         &self,
         token: String,
-        realm_id: RealmId,
+        scope: RealmScope,
         auth_session: AuthSession,
         session_code: Uuid,
     ) -> impl Future<Output = Result<AuthenticateOutput, CoreError>> + Send;
@@ -199,12 +256,15 @@ pub trait AuthenticatePort: Send + Sync {
         auth_result: AuthenticationResult,
         session_code: Uuid,
         auth_session: AuthSession,
+        scope: &RealmScope,
     ) -> impl Future<Output = Result<AuthenticateOutput, CoreError>> + Send;
     fn finalize_authentication(
         &self,
         user_id: Uuid,
         session_code: Uuid,
         auth_session: AuthSession,
+        sso_session: SsoSessionBinding,
+        scope: &RealmScope,
     ) -> impl Future<Output = Result<AuthenticateOutput, CoreError>> + Send;
 
     fn build_auth_completion(
@@ -215,7 +275,7 @@ pub trait AuthenticatePort: Send + Sync {
 
     fn using_session_code(
         &self,
-        realm_name: String,
+        scope: &RealmScope,
         client_id: String,
         session_code: Uuid,
         username: String,
@@ -245,4 +305,43 @@ pub trait LoginActionTokenRepository: Send + Sync {
     ) -> impl Future<Output = Result<Option<LoginActionToken>, AuthenticationError>> + Send;
 
     fn consume(&self, jti: Uuid) -> impl Future<Output = Result<bool, AuthenticationError>> + Send;
+}
+
+/// An SSO session just opened for a login, with the secret for the browser's
+/// `FERRISKEY_SSO` cookie. Only its hash is stored.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OpenedSsoSession {
+    pub session_id: Uuid,
+    pub cookie: String,
+    /// `None` for a cookie that dies with the browser.
+    pub max_age_secs: Option<i64>,
+}
+
+/// The cookie is a bearer secret: keep it out of logs.
+impl std::fmt::Debug for OpenedSsoSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenedSsoSession")
+            .field("session_id", &self.session_id)
+            .field("cookie", &"<redacted>")
+            .field("max_age_secs", &self.max_age_secs)
+            .finish()
+    }
+}
+
+/// Opens the SSO session a login completes into, for the login steps that do
+/// not go through the authentication service (the MFA terminal steps).
+#[cfg_attr(test, mockall::automock)]
+pub trait SsoSessionPort: Send + Sync {
+    /// Open a session for `user_id`, with the lifetime `client_id` grants,
+    /// persistent when the user asked to be remembered and the realm allows it.
+    /// With `reauth_session_id`, re-authenticate into that session instead
+    /// when it is still live and belongs to the same user.
+    fn open_for_login(
+        &self,
+        scope: &RealmScope,
+        user_id: Uuid,
+        client_id: Uuid,
+        remember_me: bool,
+        reauth_session_id: Option<Uuid>,
+    ) -> impl Future<Output = Result<OpenedSsoSession, CoreError>> + Send;
 }

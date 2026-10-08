@@ -1,0 +1,446 @@
+# 简体中文 catalogue for the shell, the shared components and the mutation toasts.
+#
+# STATUS: translated, awaiting native review. Batch #1371 rendered every entry below with the
+# product glossary, but no native speaker has read it. Lines carrying a `#` note above them are
+# the ones where the translator's judgement was a guess — start the review there.
+#
+# The keys, the {{placeholders}} and the <tags> are part of the contract — translate the words
+# around them, never the markup.
+#
+# Chinese declares a single plural category ("other"), so the *_one forms of the English
+# catalogue have no counterpart here on purpose.
+#
+# Sentences avoid a second-person pronoun where Chinese allows it; where possession must be
+# explicit the catalogue writes 您. A reviewer who prefers 你 should change both files at once.
+language:
+  switcher_label: 语言
+  search_placeholder: 搜索语言…
+  no_match: '没有与“{{query}}”匹配的语言。'
+  names:
+    en: English
+    zh-CN: 简体中文
+relative_time:
+  just_now: 刚刚
+  minutes_other: '{{count}} 分钟前'
+  hours_other: '{{count}} 小时前'
+  days_other: '{{count}} 天前'
+action:
+  add: 添加
+  cancel: 取消
+  clear_all: 全部清除
+  close: 关闭
+  confirm: 确认
+  continue: 继续
+  delete: 删除
+  discard: 放弃
+  reload: 重新加载
+  remove: 移除
+  sign_in: 登录
+state:
+  enabled: 已启用
+  disabled: 已禁用
+number:
+  value: '{{value, number}}'
+work_in_progress: 此功能正在开发中，请稍后再来查看。
+shell:
+  navigation: 导航
+  open_navigation: 打开导航
+  close_navigation: 关闭导航
+  sidebar:
+    version: v{{version}}
+    expand_hint: 展开导航
+    collapse_hint: 收起导航
+    expand_shortcut: 展开 · ⌘B
+    collapse_shortcut: 收起 · ⌘B
+  theme:
+    label: 主题
+    light: 浅色
+    dark: 深色
+    system: 跟随系统
+  account:
+    trigger: 账户
+    account: 账户
+    panel_mode: 面板模式
+    # ⚠ "Admin" and "Console" name the two panels of the product; the English is elliptical and
+    # both are arguably "consoles". 管理面板 / 控制台 keeps them apart, but a maintainer should
+    # confirm the intended names before this wording spreads.
+    panel_admin: 管理面板
+    panel_console: 控制台
+    logout: 退出登录
+  realm_picker:
+    search_placeholder: 搜索域…
+    no_match: 没有与“{{query}}”匹配的域
+    create: 创建域
+nav:
+  not_implemented: '{{label}} — 尚未实现'
+  section:
+    core: 核心
+    configuration: 配置
+    security: 安全
+  segment:
+    overview: 概览
+    clients: 客户端
+    users: 用户
+    roles: 角色
+    client-scopes: 客户端作用域
+    organizations: 组织
+    identity-providers: 身份提供商
+    user-federation: 用户联合
+    realm-settings: 域设置
+    email-templates: 邮件
+    webhooks: Webhook
+    portal: 门户
+    authentication: 认证
+    seawatch: Sea Watch
+    compass: Compass
+    settings: 设置
+    permissions: 权限
+    credentials: 凭据
+    mappers: 协议映射器
+    scopes: 作用域
+    role-mapping: 角色映射
+    attributes: 属性
+    sessions: 会话
+    account: 账户
+    theme: 主题
+    sync: 同步
+    themes: 主题
+    layouts: 布局
+    pages: 页面
+    events: 事件
+    deliveries: 投递
+    tokens: 令牌
+    login: 登录
+    general: 常规
+    password-policy: 密码策略
+    create: 新建
+console_nav:
+  section:
+    activity: 活动
+    users: 用户管理
+    applications: 应用
+    auth: 认证
+    branding: 品牌
+  item:
+    live:
+      label: 实时
+      description: 实时呈现的注册与登录
+    logs:
+      label: 日志与事件
+      description: 可搜索的事件流
+    sessions:
+      label: 会话
+      description: 活跃设备
+    messages:
+      label: 消息投递
+      description: 邮件与 Webhook
+    identities:
+      label: 身份
+      description: 客户账户
+    organizations:
+      label: 组织
+      description: B2B 分组
+    roles:
+      label: 角色
+      description: 权限与策略
+    all:
+      label: 全部应用
+      description: 移动端、SPA、Web、M2M
+    sign-in-methods:
+      label: 登录方式
+      description: 通行密钥、魔法链接、MFA
+    identity-providers:
+      label: 身份提供商
+      description: 社交登录与 SSO
+    password-policy:
+      label: 密码策略
+      description: 强度要求
+    email-templates:
+      label: 邮件模板
+      description: 事务性邮件
+    themes:
+      label: 主题
+      description: 门户外观
+    layouts:
+      label: 布局
+      description: 门户页面结构
+data_view:
+  search_placeholder: 搜索…
+  filter_all: 全部
+  view_mode:
+    list: 列表视图
+    cards: 卡片视图
+  select_all: 全选
+  select_row: 选择 {{label}}
+  select_row_generic: 选择此行
+  open_menu: 打开菜单
+  actions: 操作
+  no_results: 无结果
+  no_result_found: 未找到结果
+  no_data: 暂无数据。
+  no_match: 无匹配项
+  no_match_server_hint: 没有条目符合当前的搜索和筛选条件。
+  hidden_by_filter_other: '有 {{count}} 个条目存在，但被当前筛选条件隐藏。'
+  clear_filter: 清除筛选
+  entry_count_other: '{{count}} 个条目'
+  # ⚠ Rendered alone under a table, next to entry_count. English "3 of 50" has no natural
+  # word-for-word Chinese counter; this reorders the two figures instead.
+  shown_of_total: '{{total}} 个条目中的 {{shown}} 个'
+  pagination:
+    range: 显示第 <num>{{from}}</num> 至 <num>{{to}}</num> 条，共 <num>{{total}}</num> 条结果
+    page: 第 <num>{{current}}</num> 页，共 <num>{{total}}</num> 页
+    previous: 上一页
+    next: 下一页
+  bulk:
+    selected_other: '已选择 {{count}} 项'
+    ready_hint: 确定要删除吗？
+    confirm_hint: 点击确认以永久删除
+entity_picker:
+  search_placeholder: 搜索…
+  no_match: 无匹配项。
+  empty: 尚未配置。
+  exhausted: 所有项都已添加。
+  remove: 移除 {{label}}
+form:
+  min_selected: 至少需要选择一项。
+  chip_remove: 移除 {{value}}
+confirm_dialog:
+  type_to_confirm: 请输入 <token>{{token}}</token> 以确认。
+  mismatch: 与上方的名称不一致。
+realm_dialog:
+  title: 创建域
+  description: 每个域拥有各自的用户、凭据、角色和客户端。各个域之间相互隔离。
+  name:
+    label: 名称
+    description: 用于 URL 和令牌中。创建后无法修改。
+  display_name:
+    label: 显示名称
+    description: 在登录页面向用户展示。在您编辑之前，它会跟随名称变化。
+  submit: 创建域
+  submit_pending: 正在创建…
+  validation:
+    # 域名称 would read as 域名 (DNS domain name) + 称; 域的名称 keeps the realm sense.
+    name_required: 请输入域的名称
+    name_charset: 只允许使用字母、数字、连字符和下划线
+    display_name_length: 显示名称最多 255 个字符
+  toast:
+    created: 域 {{name}} 已创建
+    create_failed: 创建域失败
+duration:
+  unit:
+    seconds: 秒
+    minutes: 分钟
+    hours: 小时
+    days: 天
+chart:
+  series:
+    # ⚠ Chart legend entries. The English nouns are counts; 次数 makes that explicit, at the
+    # cost of two extra characters in a narrow legend.
+    logins: 登录次数
+    failures: 失败次数
+filters:
+  add: 添加筛选
+  search_fields: 搜索字段…
+  no_fields: 未找到字段。
+  no_results: 未找到结果。
+  select: 请选择…
+  # Appended after a figure by the component, as in "3 项已选中".
+  selected: 项已选中
+  tag_hint: 输入后按回车添加标签
+  boolean:
+    # ⚠ These are the on/off labels of a boolean filter, not literal booleans. 是 / 否 is what a
+    # Chinese filter UI shows; a reviewer wanting the literal reading would write 真 / 假.
+    'true': 是
+    'false': 否
+  range:
+    min: 最小值
+    max: 最大值
+    to: 至
+  group:
+    selected: 已选择
+    fields: 字段
+  # ⚠ Operator chips read as the middle of a sentence. English keeps contains/includes and
+  # excludes/not_contains as distinct pairs even though they overlap; the Chinese mirrors that
+  # split with 包含 for text and 含有 for lists. If the distinction is not real in the product,
+  # collapse them.
+  operator:
+    is: 是
+    is_not: 不是
+    is_any_of: 是其中任一
+    is_not_any_of: 不是其中任一
+    includes_all: 含有全部
+    excludes_all: 不含任何
+    before: 早于
+    after: 晚于
+    between: 介于
+    not_between: 不介于
+    contains: 包含
+    not_contains: 不包含
+    starts_with: 开头为
+    ends_with: 结尾为
+    is_exactly: 完全等于
+    equals: 等于
+    not_equals: 不等于
+    greater_than: 大于
+    less_than: 小于
+    overlaps: 有交集
+    includes: 含有
+    excludes: 不含有
+    includes_all_of: 含有以下全部
+    includes_any_of: 含有以下任一
+    empty: 为空
+    not_empty: 不为空
+  placeholder:
+    enter_field: 输入 {{field}}…
+    search_field: 搜索 {{field}}…
+    enter_key: 输入键名…
+    enter_value: 输入值…
+  validation:
+    email: 邮箱格式无效
+    url: URL 格式无效
+    tel: 电话号码格式无效
+    generic: 输入格式无效
+password:
+  rule:
+    too_short:
+      label_other: 至少 {{count}} 个字符
+      message_other: 密码长度至少为 {{count}} 个字符
+    missing_uppercase:
+      label: 一个大写字母
+      message: 密码必须包含至少一个大写字母
+    missing_lowercase:
+      label: 一个小写字母
+      message: 密码必须包含至少一个小写字母
+    missing_number:
+      label: 一个数字
+      message: 密码必须包含至少一个数字
+    missing_special:
+      label: 一个特殊字符
+      message: 密码必须包含至少一个特殊字符
+    too_long:
+      message: 密码长度最多为 {{total}} 个字符
+client_protocol:
+  oidc:
+    label: OpenID Connect
+    description: 基于令牌的登录方式，适用于 Web 应用、SPA、移动应用和 API。
+  saml:
+    label: SAML 2.0
+    description: 基于断言的登录方式，适用于只支持 SAML 的应用。
+saml:
+  name_id_format:
+    email:
+      label: 邮箱地址
+      description: 用户通过其邮箱地址标识。大多数应用都期望这种方式。
+    # ⚠ One-word option labels, kept as short as the English. 持久标识符 / 临时标识符 would read
+    # more clearly in a select but no longer matches the length of the other options.
+    persistent:
+      label: 持久
+      description: 一个稳定的不透明标识符，跨会话保持不变。
+    transient:
+      label: 临时
+      description: 一次性标识符，每次登录时重新生成。
+    unspecified:
+      label: 未指定
+      description: 由应用自行决定如何解读该标识符。
+  attribute_name_format:
+    basic:
+      label: 基本
+      # "email" here is a literal SAML attribute name, not the word — it stays in English.
+      description: 使用 email 这样的普通属性名称。通常选择这一项。
+    uri:
+      label: URI
+      description: 属性名称以完整 URI 的形式书写。
+    unspecified:
+      label: 未指定
+      description: 不向应用发送任何格式提示。
+  attribute_source:
+    email: 邮箱
+    username: 用户名
+    first_name: 名字
+    last_name: 姓氏
+    id: 用户 ID
+    custom: 自定义属性 {{key}}
+session:
+  expired: 会话已过期，请重新登录。
+  login_expired: 登录会话已过期，请重新开始登录。
+toast:
+  unexpected_error: 出了点问题，请重试。
+  import_failed: 导入失败
+  import_invalid_json: 该文件不是有效的 JSON。
+  attribute:
+    deleted: 属性已删除
+  client:
+    updated: 客户端 {{name}} 已成功更新
+    scope_assigned:
+      default: 作用域已成功指定为默认
+      optional: 作用域已成功指定为可选
+    scope_assign_failed: 指定作用域失败
+    scope_unassigned:
+      default: 默认作用域已成功取消指定
+      optional: 可选作用域已成功取消指定
+    scope_unassign_failed: 取消指定作用域失败
+  client_scope:
+    created: 客户端作用域创建成功
+    create_failed: 创建客户端作用域失败
+    updated: 客户端作用域更新成功
+    update_failed: 更新客户端作用域失败
+    deleted: 客户端作用域删除成功
+    delete_failed: 删除客户端作用域失败
+  protocol_mapper:
+    created: 协议映射器创建成功
+    create_failed: 创建协议映射器失败
+    updated: 协议映射器更新成功
+    update_failed: 更新协议映射器失败
+    deleted: 协议映射器删除成功
+    delete_failed: 删除协议映射器失败
+  role:
+    created: 角色创建成功
+    create_failed: 创建角色失败
+    updated: 角色更新成功
+    updated_detail: 角色 {{name}} 已成功更新。
+    update_failed: 更新角色失败
+    permissions_updated: 角色权限更新成功
+    permissions_updated_detail: 角色 {{name}} 的权限已成功更新。
+    deleted: 角色删除成功
+    deleted_detail: 角色已成功从客户端中删除。
+    delete_failed: 删除角色失败
+  organization:
+    created: 组织“{{name}}”创建成功
+    updated: 组织“{{name}}”更新成功
+    deleted: 组织已删除
+    member_removed: 成员已从组织中移除
+    user_added: 用户已添加到组织
+    user_removed: 用户已从组织中移除
+  email_template:
+    created: 邮件模板创建成功
+    saved: 邮件模板保存成功
+    imported: 邮件模板导入成功
+    deleted: 邮件模板删除成功
+  portal_layout:
+    created: 门户布局创建成功
+    saved: 门户布局保存成功
+    deleted: 门户布局删除成功
+    default_updated: 默认门户布局已更新
+    imported: 门户布局导入成功
+  maintenance:
+    client_entry_added: 白名单条目已添加
+    client_entry_removed: 白名单条目已移除
+    realm_entry_added: 域白名单条目已添加
+    realm_entry_removed: 域白名单条目已移除
+  password_reset:
+    link_sent: 如果存在使用该邮箱的账户，重置链接已发送
+    link_failed: 发送重置链接失败
+    reset_failed: 重置密码失败
+  smtp:
+    saved: SMTP 配置保存成功
+    save_failed: 保存 SMTP 配置失败
+    deleted: SMTP 配置已删除
+    delete_failed: 删除 SMTP 配置失败
+  saml:
+    sp_configured: 服务提供商已配置
+    sp_updated: 服务提供商已更新
+    sp_save_failed: 无法保存服务提供商
+    attribute_mapped: 属性 {{name}} 已映射
+    attribute_map_failed: 无法映射该属性
+    attribute_removed: 属性映射已移除
+    attribute_remove_failed: 无法移除该属性映射

@@ -3,6 +3,7 @@
 //! mocks (`mock` feature) and cross-domain entities are already wired up.
 #[cfg(test)]
 mod tests {
+    use crate::domain::authentication::entities::AuthProtocol;
     use std::sync::Arc;
 
     use uuid::Uuid;
@@ -10,8 +11,9 @@ mod tests {
     use crate::domain::abyss::identity_provider::IdentityProviderPolicy;
     use crate::domain::authentication::value_objects::Identity;
     use crate::domain::client::ports::MockClientRepository;
+    use crate::domain::common::entities::app_errors::CoreError;
     use crate::domain::common::policies::FerriskeyPolicy;
-    use crate::domain::realm::entities::{Realm, RealmId};
+    use crate::domain::realm::entities::{Realm, RealmId, Unscoped};
     use crate::domain::role::entities::Role;
     use crate::domain::role::entities::permission::Permissions;
     use crate::domain::user::entities::User;
@@ -46,6 +48,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
             failed_login_attempts: 0,
             locked_until: None,
+            locale: None,
         }
     }
 
@@ -83,10 +86,11 @@ mod tests {
             public_client: false,
             direct_access_grants_enabled: false,
             oauth_device_code_grant_enabled: false,
+            token_exchange_enabled: false,
             require_pkce: false,
             service_account_enabled: false,
             client_type: ClientType::Confidential,
-            protocol: "openid-connect".to_string(),
+            protocol: AuthProtocol::OpenIdConnect,
             redirect_uris: None,
             access_token_lifetime: None,
             refresh_token_lifetime: None,
@@ -97,6 +101,9 @@ mod tests {
             maintenance_session_strategy: MaintenanceSessionStrategy::default(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            backchannel_logout_uri: None,
+            backchannel_logout_session_required: true,
+            consent_required: false,
         }
     }
 
@@ -129,7 +136,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_can_view_identity_provider_with_view_realm_permission() {
+    async fn test_can_view_identity_provider_with_view_identity_providers_permission() {
         let realm = create_test_realm("test");
         let user = create_test_user_with_realm(&realm);
         let identity = Identity::User(user.clone());
@@ -138,7 +145,7 @@ mod tests {
         let client_repo = MockClientRepository::new();
         let mut user_role_repo = MockUserRoleRepository::new();
 
-        let role = create_role_with_permission(realm.id, Permissions::ViewRealm);
+        let role = create_role_with_permission(realm.id, Permissions::ViewIdentityProviders);
         user_role_repo.expect_get_user_roles().returning(move |_| {
             let r = role.clone();
             Box::pin(async move { Ok(vec![r]) })
@@ -259,16 +266,15 @@ mod tests {
             .can_view_identity_provider(&identity, &provider_realm)
             .await;
 
-        assert!(result.is_ok());
-        assert!(!result.unwrap());
+        assert!(matches!(result, Err(CoreError::NotFound)));
     }
 
     // ---- FK-006: master reaching another realm ------------------------------
     //
     // These two are the case the previous suite claimed to cover and did not. Its
     // `test_master_realm_can_access_other_realms` built the target realm with
-    // `name: user_realm.name.clone()`, which forced `is_cross_realm_access` to false,
-    // so `get_client_specific_permissions` was never called and its mock was never
+    // `name: user_realm.name.clone()`, which made the access look same-realm, so the
+    // `<target>-realm` client lookup was never reached and its mock was never
     // consulted. The assertion passed through the unscoped union instead — the very
     // branch the fix removes. Each test below sets `.times(1)` on the client lookup
     // so that regression cannot pass silently again.
@@ -289,7 +295,7 @@ mod tests {
             .times(1)
             .returning(move |_, _| {
                 let c = target_client.clone();
-                Box::pin(async move { Ok(c) })
+                Box::pin(async move { Ok(Unscoped::new(c)) })
             });
 
         // Scoped to the `other-realm` client: this is a legitimate delegation.
@@ -334,7 +340,7 @@ mod tests {
             .times(1)
             .returning(move |_, _| {
                 let c = target_client.clone();
-                Box::pin(async move { Ok(c) })
+                Box::pin(async move { Ok(Unscoped::new(c)) })
             });
 
         // A plain realm role of `master` — `client_id: None`. Under the old code the

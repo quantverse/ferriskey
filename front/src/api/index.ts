@@ -2,6 +2,8 @@ import { toast } from 'sonner'
 import { type Fetcher } from '@/api/api.client.ts'
 import { authRefreshController } from '@/hooks/auth-refresh-controller.ts'
 import { authStore } from '@/store/auth.store.ts'
+import { errorMessageFromBody } from '@/lib/api-error.ts'
+import { translate } from '@/lib/i18n'
 
 export interface BaseQuery {
   realm?: string
@@ -145,9 +147,9 @@ export const fetcher: Fetcher['fetch'] = async (input) => {
           refreshError.message !== 'refresh temporarily blocked'
         ) {
           authStore.getState().setTokens(null, null, null)
-          toast.error('Your session expired. Please sign in again.', {
+          toast.error(translate('common:session.expired'), {
             action: {
-              label: 'Sign in',
+              label: translate('common:action.sign_in'),
               onClick: () => {
                 window.location.href = `/realms/${realm}/authentication/login`
               },
@@ -167,7 +169,7 @@ export const fetcher: Fetcher['fetch'] = async (input) => {
     }
 
     const error: Error & { status?: number; data?: Record<string, unknown> } = new Error(
-      (errorBody?.message as string) ?? `HTTP ${response.status}: ${response.statusText}`,
+      errorMessageFromBody(errorBody) ?? `HTTP ${response.status}: ${response.statusText}`,
     )
     error.status = response.status
     error.data = errorBody

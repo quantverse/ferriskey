@@ -11,6 +11,7 @@ use ferriskey_api_core::app_state::AppState;
 use ferriskey_core::domain::client::entities::Client;
 use ferriskey_core::domain::client::ports::ClientService;
 use ferriskey_core::domain::client::value_objects::UpdateClientRequest;
+use ferriskey_core::domain::webhook::endpoint::{PrivateEndpoints, validate_endpoint};
 use ferriskey_core::domain::{
     authentication::value_objects::Identity, client::entities::UpdateClientInput,
 };
@@ -48,6 +49,14 @@ pub async fn update_client(
     Extension(identity): Extension<Identity>,
     ValidateJson(payload): ValidateJson<UpdateClientValidator>,
 ) -> Result<Response<UpdateClientResponse>, ApiError> {
+    // Structure only: whether the host may be private is decided when a
+    // logout token is sent, against the address it resolves to then.
+    if let Some(Some(uri)) = &payload.backchannel_logout_uri {
+        validate_endpoint(uri, PrivateEndpoints::Allowed).map_err(|error| {
+            ApiError::validation_error("backchannel_logout_uri", "invalid_uri", error.to_string())
+        })?;
+    }
+
     let client = state
         .service
         .update_client(
@@ -61,14 +70,19 @@ pub async fn update_client(
                     enabled: payload.enabled,
                     direct_access_grants_enabled: payload.direct_access_grants_enabled,
                     oauth_device_code_grant_enabled: payload.oauth_device_code_grant_enabled,
+                    token_exchange_enabled: payload.token_exchange_enabled,
                     require_pkce: payload.require_pkce,
                     access_token_lifetime: payload.access_token_lifetime,
                     refresh_token_lifetime: payload.refresh_token_lifetime,
                     id_token_lifetime: payload.id_token_lifetime,
                     temporary_token_lifetime: payload.temporary_token_lifetime,
+                    backchannel_logout_uri: payload.backchannel_logout_uri,
+                    backchannel_logout_session_required: payload
+                        .backchannel_logout_session_required,
                     maintenance_enabled: None,
                     maintenance_reason: None,
                     maintenance_session_strategy: None,
+                    consent_required: payload.consent_required,
                 },
             },
         )

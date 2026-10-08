@@ -32,6 +32,11 @@ pub struct Model {
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
     pub protocol: String,
+    pub user_session_id: Option<Uuid>,
+    pub remember_me: bool,
+    pub reauth_session_id: Option<Uuid>,
+    pub consent_token_hash: Option<String>,
+    pub prompt_consent: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveColumn)]
@@ -55,6 +60,11 @@ pub enum Column {
     CodeChallenge,
     CodeChallengeMethod,
     Protocol,
+    UserSessionId,
+    RememberMe,
+    ReauthSessionId,
+    ConsentTokenHash,
+    PromptConsent,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DerivePrimaryKey)]
@@ -75,6 +85,8 @@ pub enum Relation {
     Clients,
     CompassFlows,
     Realms,
+    UserSessions2,
+    UserSessions1,
     Users,
 }
 
@@ -86,7 +98,6 @@ impl ColumnTrait for Column {
             Self::RealmId => ColumnType::Uuid.def(),
             Self::ClientId => ColumnType::Uuid.def(),
             Self::RedirectUri => ColumnType::String(StringLen::N(255u32)).def(),
-            Self::Protocol => ColumnType::String(StringLen::N(32u32)).def(),
             Self::ResponseType => ColumnType::String(StringLen::N(255u32)).def().null(),
             Self::Scope => ColumnType::String(StringLen::N(255u32)).def().null(),
             Self::State => ColumnType::Text.def().null(),
@@ -104,6 +115,12 @@ impl ColumnTrait for Column {
             Self::CompassFlowId => ColumnType::Uuid.def().null(),
             Self::CodeChallenge => ColumnType::Text.def().null(),
             Self::CodeChallengeMethod => ColumnType::String(StringLen::N(10u32)).def().null(),
+            Self::Protocol => ColumnType::String(StringLen::N(32u32)).def(),
+            Self::UserSessionId => ColumnType::Uuid.def().null(),
+            Self::RememberMe => ColumnType::Boolean.def(),
+            Self::ReauthSessionId => ColumnType::Uuid.def().null(),
+            Self::ConsentTokenHash => ColumnType::Text.def().null().unique(),
+            Self::PromptConsent => ColumnType::Boolean.def(),
         }
     }
 }
@@ -125,6 +142,14 @@ impl RelationTrait for Relation {
             Self::Realms => Entity::belongs_to(super::realms::Entity)
                 .from(Column::RealmId)
                 .to(super::realms::Column::Id)
+                .into(),
+            Self::UserSessions2 => Entity::belongs_to(super::user_sessions::Entity)
+                .from(Column::ReauthSessionId)
+                .to(super::user_sessions::Column::Id)
+                .into(),
+            Self::UserSessions1 => Entity::belongs_to(super::user_sessions::Entity)
+                .from(Column::UserSessionId)
+                .to(super::user_sessions::Column::Id)
                 .into(),
             Self::Users => Entity::belongs_to(super::users::Entity)
                 .from((Column::UserId, Column::UserId))

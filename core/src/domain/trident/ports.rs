@@ -3,7 +3,7 @@ use ferriskey_trident::entities::{MagicLink, PasswordResetToken};
 use uuid::Uuid;
 
 use crate::domain::{
-    authentication::value_objects::Identity,
+    authentication::{ports::OpenedSsoSession, value_objects::Identity},
     common::entities::app_errors::CoreError,
     crypto::HashResult,
     trident::entities::{MfaRecoveryCode, TotpSecret},
@@ -52,18 +52,21 @@ pub struct WebAuthnValidatePublicKeyInput {
 pub struct WebAuthnValidatePublicKeyOutput {}
 
 pub struct WebAuthnPublicKeyRequestOptionsInput {
+    pub realm_name: String,
     pub session_code: String,
     pub rp_info: WebAuthnRpInfo,
 }
 pub struct WebAuthnPublicKeyRequestOptionsOutput(pub RequestChallengeResponse);
 
 pub struct WebAuthnPublicKeyAuthenticateInput {
+    pub realm_name: String,
     pub session_code: String,
     pub rp_info: WebAuthnRpInfo,
     pub credential: PublicKeyCredential,
 }
 pub struct WebAuthnPublicKeyAuthenticateOutput {
     pub login_url: String,
+    pub sso_session: OpenedSsoSession,
 }
 
 pub struct PasskeyRequestOptionsInput {
@@ -78,10 +81,12 @@ pub struct PasskeyAuthenticateInput {
     pub session_code: String,
     pub rp_info: WebAuthnRpInfo,
     pub credential: PublicKeyCredential,
+    pub remember_me: bool,
 }
 
 pub struct PasskeyAuthenticateOutput {
     pub login_url: String,
+    pub sso_session: OpenedSsoSession,
 }
 
 pub struct ChallengeOtpInput {
@@ -91,6 +96,7 @@ pub struct ChallengeOtpInput {
 
 pub struct ChallengeOtpOutput {
     pub login_url: Option<String>,
+    pub sso_session: Option<OpenedSsoSession>,
     pub required_actions: Vec<RequiredAction>,
     pub temporary_token: Option<String>,
 }
@@ -113,6 +119,7 @@ pub struct UpdatePasswordInput {
 /// `OtpEnrollment` the server itself issued; taking it from the request body made the
 /// verification a tautology and let a caller enrol a secret of their choosing (FK-003).
 pub struct VerifyOtpInput {
+    pub realm_name: String,
     pub code: String,
     pub label: Option<String>,
 }
@@ -123,6 +130,7 @@ pub struct VerifyOtpOutput {
 }
 
 pub struct GenerateRecoveryCodeInput {
+    pub realm_name: String,
     pub amount: u8,
     pub format: String,
 }
@@ -132,6 +140,7 @@ pub struct GenerateRecoveryCodeOutput {
 }
 
 pub struct BurnRecoveryCodeInput {
+    pub realm_name: String,
     pub session_code: String,
     pub format: String,
     pub code: String,
@@ -139,6 +148,7 @@ pub struct BurnRecoveryCodeInput {
 
 pub struct BurnRecoveryCodeOutput {
     pub login_url: String,
+    pub sso_session: OpenedSsoSession,
 }
 
 pub struct MagicLinkInput {
@@ -148,6 +158,8 @@ pub struct MagicLinkInput {
     /// Session code from the FERRISKEY_SESSION cookie at send time,
     /// stored so verify can use the correct AuthSession without an OAuth redirect.
     pub session_code: Option<String>,
+    /// The "remember me" choice, applied when the link completes the login.
+    pub remember_me: bool,
 }
 
 pub struct VerifyMagicLinkInput {
@@ -177,6 +189,14 @@ pub struct CompletePasswordResetOutput {
     /// login URL (containing an authorization code) the browser should be
     /// redirected to so the original client gets its callback.
     pub login_url: Option<String>,
+    /// The SSO session opened alongside `login_url`, for the browser's cookie.
+    pub sso_session: Option<OpenedSsoSession>,
+}
+
+#[derive(Debug)]
+pub struct VerifyMagicLinkOutput {
+    pub login_url: String,
+    pub sso_session: OpenedSsoSession,
 }
 
 pub struct VerifyResetTokenInput {
@@ -337,7 +357,7 @@ pub trait TridentService: Send + Sync {
     fn verify_magic_link(
         &self,
         input: VerifyMagicLinkInput,
-    ) -> impl Future<Output = Result<String, CoreError>> + Send;
+    ) -> impl Future<Output = Result<VerifyMagicLinkOutput, CoreError>> + Send;
 
     fn request_password_reset(
         &self,

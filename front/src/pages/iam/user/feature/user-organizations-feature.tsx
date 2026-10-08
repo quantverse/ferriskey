@@ -1,0 +1,96 @@
+import { useMemo, useState } from 'react'
+import { useParams } from 'react-router'
+import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
+import {
+  useAddUserToOrganization,
+  useGetOrganizations,
+  useGetUserOrganizations,
+  useRemoveUserFromOrganization,
+} from '@/api/organization.api'
+import { RouterParams } from '@/routes/router'
+import { assignOrganizationSchema } from '@/pages/iam/user/schemas/assign-organization.schema'
+import UserOrganizationsTab, { type UserMembership } from '../ui/user-organizations-tab'
+
+export default function UserOrganizationsFeature() {
+  const { realm_name, user_id } = useParams<RouterParams>()
+  const { t } = useTranslation('user')
+  const realm = realm_name ?? 'master'
+
+  const {
+    data: userOrgs,
+    isLoading: isLoadingMemberships,
+    isError,
+  } = useGetUserOrganizations({ realm, userId: user_id })
+  const { data: allOrgsResponse, isLoading: isLoadingOrgs } = useGetOrganizations({ realm })
+  const { mutateAsync: addToOrganization } = useAddUserToOrganization()
+  const { mutate: removeFromOrganization } = useRemoveUserFromOrganization()
+
+  const [selectedOrganizationIds, setSelectedOrganizationIds] = useState<string[]>([])
+
+  const memberships = useMemo<UserMembership[]>(() => {
+    if (!userOrgs || !allOrgsResponse) return []
+    const organizations = new Map(allOrgsResponse.data.map((org) => [org.id, org]))
+    return userOrgs.flatMap((member) => {
+      const organization = organizations.get(member.organization_id)
+      return organization ? [{ organization, joinedAt: member.created_at }] : []
+    })
+  }, [userOrgs, allOrgsResponse])
+
+  const availableOrganizations = useMemo(() => {
+    const assigned = new Set(memberships.map((m) => m.organization.id))
+    return (allOrgsResponse?.data ?? []).filter((org) => !assigned.has(org.id))
+  }, [memberships, allOrgsResponse])
+
+  const handleAssign = async () => {
+    if (!user_id || !realm_name) {
+      toast.error(t('detail.organizations.toast.missing_context'))
+      return
+    }
+    if (
+      !assignOrganizationSchema.safeParse({ organizationIds: selectedOrganizationIds }).success
+    )
+      return
+
+    const attempted = selectedOrganizationIds
+    const outcomes = await Promise.allSettled(
+      attempted.map((organizationId) =>
+        addToOrganization({
+          path: { realm_name, organization_id: organizationId },
+          body: { user_id },
+        })
+      )
+    )
+
+    const failed = attempted.filter((_, index) => outcomes[index].status === 'rejected')
+    setSelectedOrganizationIds(failed)
+
+    const assignedCount = attempted.length - failed.length
+    if (assignedCount > 0) {
+      toast.success(t('detail.organizations.toast.assigned', { count: assignedCount }))
+    }
+    if (failed.length > 0) {
+      toast.error(t('detail.organizations.toast.assign_failed', { count: failed.length }))
+    }
+  }
+
+  const handleRemove = (organizationId: string) => {
+    if (!user_id || !realm_name) return
+    removeFromOrganization({
+      path: { realm_name, organization_id: organizationId, user_id },
+    })
+  }
+
+  return (
+    <UserOrganizationsTab
+      memberships={memberships}
+      availableOrganizations={availableOrganizations}
+      isLoading={isLoadingMemberships || isLoadingOrgs}
+      isError={isError}
+      selectedOrganizationIds={selectedOrganizationIds}
+      onSelectedOrganizationIdsChange={setSelectedOrganizationIds}
+      onAssign={handleAssign}
+      onRemove={handleRemove}
+    />
+  )
+}

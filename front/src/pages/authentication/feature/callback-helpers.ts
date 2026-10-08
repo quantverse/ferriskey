@@ -1,5 +1,7 @@
 const DEFAULT_REALM = 'master'
 
+export type CallbackParamsError = 'missing_code' | 'invalid_state'
+
 export function validateCallbackParams({
   code,
   returnedState,
@@ -8,13 +10,13 @@ export function validateCallbackParams({
   code: string | null
   returnedState: string | null
   expectedState: string | null
-}) {
+}): CallbackParamsError | null {
   if (!code) {
-    return 'Missing authorization code. Please try again.'
+    return 'missing_code'
   }
 
   if (!returnedState || !expectedState || returnedState !== expectedState) {
-    return 'Invalid login state. Please try signing in again.'
+    return 'invalid_state'
   }
 
   return null
@@ -27,12 +29,4 @@ export function buildLoginErrorRedirect(realmName: string | undefined, errorMess
   })
 
   return `/realms/${realm}/authentication/login?${params.toString()}`
-}
-
-export function getTokenExchangeErrorMessage(error: unknown) {
-  if (error instanceof Error && error.message.trim().length > 0) {
-    return error.message
-  }
-
-  return 'Unable to complete sign in. Please try again.'
 }

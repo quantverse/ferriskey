@@ -1,6 +1,7 @@
 use chrono::{TimeZone, Utc};
 
 use crate::{
+    domain::authentication::entities::AuthProtocol,
     domain::client::entities::{Client, ClientType, MaintenanceSessionStrategy},
     entity::clients::Model,
 };
@@ -10,6 +11,19 @@ impl From<Model> for Client {
         let created_at = Utc.from_utc_datetime(&model.created_at);
         let updated_at = Utc.from_utc_datetime(&model.updated_at);
 
+        let protocol = model
+            .protocol
+            .parse::<AuthProtocol>()
+            .unwrap_or_else(|reason| {
+                tracing::warn!(
+                    client_id = %model.client_id,
+                    %reason,
+                    "reading a client whose stored protocol is unknown, falling back to openid-connect"
+                );
+
+                AuthProtocol::OpenIdConnect
+            });
+
         Client {
             id: model.id,
             realm_id: model.realm_id.into(),
@@ -17,12 +31,13 @@ impl From<Model> for Client {
             client_id: model.client_id,
             secret: model.secret.map(maskass::Masked::new),
             enabled: model.enabled,
-            protocol: model.protocol,
+            protocol,
             public_client: model.public_client,
             service_account_enabled: model.service_account_enabled,
             direct_access_grants_enabled: model.direct_access_grants_enabled.unwrap_or(false),
             oauth_device_code_grant_enabled: model.oauth_device_code_grant_enabled.unwrap_or(false),
             require_pkce: model.require_pkce.unwrap_or(false),
+            token_exchange_enabled: model.token_exchange_enabled,
             client_type: model
                 .client_type
                 .parse::<ClientType>()
@@ -40,6 +55,9 @@ impl From<Model> for Client {
                 .unwrap_or_default(),
             created_at,
             updated_at,
+            backchannel_logout_uri: model.backchannel_logout_uri,
+            backchannel_logout_session_required: model.backchannel_logout_session_required,
+            consent_required: model.consent_required,
         }
     }
 }

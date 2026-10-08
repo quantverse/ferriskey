@@ -7,6 +7,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::generate_uuid_v7;
+use crate::realm::scope::RealmOwned;
 use crate::realm::{Realm, RealmId};
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema, PartialEq)]
@@ -42,11 +43,18 @@ pub struct User {
     pub updated_at: DateTime<Utc>,
     pub failed_login_attempts: i32,
     pub locked_until: Option<DateTime<Utc>>,
+    pub locale: Option<String>,
 }
 
 impl User {
     pub fn is_locked(&self, now: DateTime<Utc>) -> bool {
         self.locked_until.is_some_and(|t| t > now)
+    }
+}
+
+impl RealmOwned for User {
+    fn realm_id(&self) -> RealmId {
+        self.realm_id
     }
 }
 
@@ -74,6 +82,7 @@ mod tests {
             updated_at: now,
             failed_login_attempts: 0,
             locked_until: None,
+            locale: None,
         }
     }
 
@@ -96,9 +105,44 @@ mod tests {
         user.locked_until = Some(Utc::now() - Duration::seconds(1));
         assert!(!user.is_locked(Utc::now()));
     }
+
+    fn make_config() -> UserConfig {
+        UserConfig {
+            id: None,
+            realm_id: crate::realm::RealmId::default(),
+            client_id: None,
+            username: "test".to_string(),
+            firstname: None,
+            lastname: None,
+            email: None,
+            email_verified: false,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn new_generates_a_time_ordered_id_when_none_is_supplied() {
+        let user = User::new(make_config());
+
+        assert_eq!(user.id.get_version_num(), 7);
+    }
+
+    #[test]
+    fn new_keeps_a_supplied_id() {
+        let supplied = uuid::Uuid::new_v4();
+
+        let user = User::new(UserConfig {
+            id: Some(supplied),
+            ..make_config()
+        });
+
+        assert_eq!(user.id, supplied);
+        assert_eq!(user.id.get_version_num(), 4);
+    }
 }
 
 pub struct UserConfig {
+    pub id: Option<Uuid>,
     pub realm_id: RealmId,
     pub client_id: Option<Uuid>,
     pub username: String,
@@ -175,7 +219,7 @@ pub enum RequiredActionError {
 impl User {
     pub fn new(user_config: UserConfig) -> Self {
         let now = Utc::now();
-        let id = generate_uuid_v7();
+        let id = user_config.id.unwrap_or_else(generate_uuid_v7);
 
         Self {
             id,
@@ -194,6 +238,7 @@ impl User {
             updated_at: now,
             failed_login_attempts: 0,
             locked_until: None,
+            locale: None,
         }
     }
 }

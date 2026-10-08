@@ -1,8 +1,10 @@
 import { CapCaptcha } from '@/components/cap-captcha'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Card, CardContent } from '@/components/ui/card'
 import { Form, FormField } from '@/components/ui/form'
 import { UseFormReturn } from 'react-hook-form'
+import { Trans, useTranslation } from 'react-i18next'
 import { AuthenticateSchema } from '@/pages/authentication/feature/page-login-feature'
 import { MagicLinkSchema } from '@/pages/authentication/schemas/magic-link.schema'
 import { cn } from '@/lib/utils'
@@ -15,6 +17,7 @@ import './page-login.css'
 import LoaderSpinner from '@/components/ui/loader-spinner'
 import { Separator } from '@/components/ui/separator'
 import { ArrowLeft, KeyRound, Mail, ShieldAlert, Wrench } from 'lucide-react'
+import { AUTH_NAMESPACE, BRAND_NAME } from '../constants'
 
 export type MagicLinkStep = 'idle' | 'form' | 'sent'
 
@@ -25,6 +28,7 @@ export interface PageLoginProps {
   isLoading?: boolean
   loginSettings?: RealmLoginSetting
   errorMessage?: string | null
+  isMaintenanceError?: boolean
   onPasskeyLogin?: () => void
   isPasskeyLoading?: boolean
   onMagicLinkLogin?: () => void
@@ -43,6 +47,7 @@ export default function PageLogin({
   isLoading,
   loginSettings,
   errorMessage,
+  isMaintenanceError,
   onPasskeyLogin,
   isPasskeyLoading,
   onMagicLinkLogin,
@@ -54,6 +59,7 @@ export default function PageLogin({
   onCaptchaSolve,
 }: PageLoginProps) {
   const { realm_name } = useParams()
+  const { t } = useTranslation(AUTH_NAMESPACE)
 
   if (isError) return <ErrorMessage />
   if (isLoading) return <LoadingMessage />
@@ -64,14 +70,14 @@ export default function PageLogin({
   const aliases = loginSettings.login_aliases ?? ['username']
   const identifierLabel =
     aliases.length > 1
-      ? 'Username or email'
+      ? t('login.identifier.username_or_email')
       : aliases[0] === 'email'
-        ? 'Email'
-        : 'Username'
+        ? t('login.identifier.email')
+        : t('login.identifier.username')
 
   return (
     <div className='login-shell relative flex min-h-svh items-center justify-center px-6 py-10'>
-      <div className='relative z-10 w-full max-w-sm md:max-w-md lg:max-w-lg'>
+      <div className='relative z-10 w-full max-w-[380px]'>
         <div className={cn('flex flex-col gap-6')}>
           <Card className='login-card overflow-hidden border p-0 shadow-sm'>
             <CardContent className='grid gap-0 p-0'>
@@ -87,38 +93,38 @@ export default function PageLogin({
               ) : (
                 <Form {...form}>
                   <form onSubmit={form.handleSubmit(onSubmit)}>
-                    <div className='p-8 md:p-10'>
-                      <div className='flex flex-col gap-7'>
-                        <div className='space-y-2'>
-                          <div className='flex items-center gap-3'>
+                    <div className='p-6'>
+                      <div className='flex flex-col gap-5'>
+                        <div className='space-y-1.5'>
+                          <div className='flex items-center gap-2'>
                             <img
                               src='/logo_ferriskey.png'
-                              alt='FerrisKey'
-                              className='h-7 w-7 object-contain'
+                              alt={BRAND_NAME}
+                              className='h-5 w-5 object-contain'
                             />
-                            <p className='text-xs font-semibold uppercase tracking-[0.35em] text-muted-foreground'>
-                              FerrisKey
+                            <p className='text-[11px] font-semibold uppercase tracking-[0.2em] text-muted-foreground'>
+                              {BRAND_NAME}
                             </p>
                           </div>
-                          <h1 className='login-title text-3xl font-semibold tracking-tight text-foreground'>
+                          <h1 className='login-title text-xl font-semibold tracking-tight text-foreground'>
                             {loginSettings.display_name?.trim()
                               ? loginSettings.display_name
-                              : (realm_name?.toUpperCase() ?? 'Login')}
+                              : (realm_name?.toUpperCase() ?? t('login.title'))}
                           </h1>
                         </div>
                         {errorMessage && (
-                          errorMessage.includes('under maintenance') ? (
-                            <div className='rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-700 dark:text-amber-400 flex items-start gap-2'>
+                          isMaintenanceError ? (
+                            <div className='rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400 flex items-start gap-2'>
                               <Wrench className='h-4 w-4 mt-0.5 shrink-0' />
-                              <span>{errorMessage.replace(/^.*under maintenance:\s*/i, '')}</span>
+                              <span>{errorMessage}</span>
                             </div>
                           ) : (
-                            <div className='rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive'>
+                            <div className='rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive'>
                               {errorMessage}
                             </div>
                           )
                         )}
-                        <div className='grid gap-3'>
+                        <div className='grid gap-2'>
                           <FormField
                             control={form.control}
                             name='username'
@@ -133,15 +139,13 @@ export default function PageLogin({
                               />
                             )}
                           />
-                        </div>
-                        <div className='grid gap-3'>
                           <FormField
                             control={form.control}
                             name='password'
                             render={({ field }) => (
                               <InputText
                                 {...field}
-                                label='Password'
+                                label={t('login.password')}
                                 name='password'
                                 type='password'
                                 className='w-full'
@@ -149,27 +153,44 @@ export default function PageLogin({
                               />
                             )}
                           />
-                          {loginSettings?.forgot_password_enabled && (
+                          {(loginSettings?.remember_me_enabled || loginSettings?.forgot_password_enabled) && (
                             <div className='flex items-center'>
+                              {loginSettings?.remember_me_enabled && (
+                                <FormField
+                                  control={form.control}
+                                  name='remember_me'
+                                  render={({ field }) => (
+                                    <label className='flex items-center gap-2 text-xs text-muted-foreground'>
+                                      <Checkbox
+                                        checked={field.value}
+                                        onCheckedChange={(checked) => field.onChange(checked === true)}
+                                      />
+                                      {t('login.remember_me')}
+                                    </label>
+                                  )}
+                                />
+                              )}
+                              {loginSettings?.forgot_password_enabled && (
                               <Link
                                 to={'../forgot-password'}
                                 className='ml-auto text-xs font-medium text-muted-foreground underline-offset-4 transition hover:text-foreground hover:underline'
                               >
-                                Forgot your password?
+                                {t('login.forgot_password')}
                               </Link>
+                              )}
                             </div>
                           )}
                         </div>
                         {onCaptchaSolve && <CapCaptcha onSolve={onCaptchaSolve} />}
-                        <Button type='submit' className='w-full rounded-lg py-5 text-sm'>
-                          Login
+                        <Button type='submit' className='h-10 w-full rounded-lg text-sm'>
+                          {t('login.submit')}
                         </Button>
                         {(onPasskeyLogin || onMagicLinkLogin) && (
                           <>
                             <div className='relative'>
                               <Separator />
                               <span className='absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 bg-card px-2 text-xs text-muted-foreground'>
-                                or
+                                {t('login.separator')}
                               </span>
                             </div>
                             <div className='flex flex-col gap-2'>
@@ -177,37 +198,44 @@ export default function PageLogin({
                                 <Button
                                   type='button'
                                   variant='outline'
-                                  className='w-full rounded-lg py-5 text-sm'
+                                  className='h-10 w-full rounded-lg text-sm'
                                   onClick={onPasskeyLogin}
                                   disabled={isPasskeyLoading}
                                 >
                                   <KeyRound className='mr-2 h-4 w-4' />
-                                  Sign in with a passkey
+                                  {t('login.passkey')}
                                 </Button>
                               )}
                               {onMagicLinkLogin && (
                                 <Button
                                   type='button'
                                   variant='outline'
-                                  className='w-full rounded-lg py-5 text-sm'
+                                  className='h-10 w-full rounded-lg text-sm'
                                   onClick={onMagicLinkLogin}
                                   disabled={isMagicLinkLoading}
                                 >
                                   <Mail className='mr-2 h-4 w-4' />
-                                  Sign in with a magic link
+                                  {t('login.magic_link')}
                                 </Button>
                               )}
                             </div>
                           </>
                         )}
-                        <div className='space-y-4'>
+                        <div className='space-y-3'>
                           <LoginProviders providers={providers} />
                           {loginSettings.user_registration_enabled && (
                             <div className='text-center text-xs text-muted-foreground md:text-sm'>
-                              Don&apos;t have an account?{' '}
-                              <Link to={'../register'} className='font-semibold text-foreground underline underline-offset-4'>
-                                Sign up
-                              </Link>
+                              <Trans
+                                i18nKey={`${AUTH_NAMESPACE}:login.no_account`}
+                                components={{
+                                  signup: (
+                                    <Link
+                                      to={'../register'}
+                                      className='font-semibold text-foreground underline underline-offset-4'
+                                    />
+                                  ),
+                                }}
+                              />
                             </div>
                           )}
                         </div>
@@ -235,12 +263,14 @@ function MagicLinkFormView({
   onBack?: () => void
   isLoading?: boolean
 }) {
+  const { t } = useTranslation(AUTH_NAMESPACE)
+
   return (
     <Form {...form}>
       <form onSubmit={form.handleSubmit(onSubmit)}>
-        <div className='p-8 md:p-10'>
-          <div className='flex flex-col gap-7'>
-            <div className='space-y-2'>
+        <div className='p-6'>
+          <div className='flex flex-col gap-5'>
+            <div className='space-y-1.5'>
               {onBack && (
                 <button
                   type='button'
@@ -248,20 +278,20 @@ function MagicLinkFormView({
                   className='mb-1 flex items-center gap-1 text-xs text-muted-foreground transition hover:text-foreground'
                 >
                   <ArrowLeft className='h-3 w-3' />
-                  Back to login
+                  {t('actions.back_to_login')}
                 </button>
               )}
-              <div className='flex items-center gap-3'>
-                <img src='/logo_ferriskey.png' alt='FerrisKey' className='h-7 w-7 object-contain' />
-                <p className='text-xs font-semibold uppercase tracking-[0.35em] text-muted-foreground'>
-                  FerrisKey
+              <div className='flex items-center gap-2'>
+                <img src='/logo_ferriskey.png' alt={BRAND_NAME} className='h-5 w-5 object-contain' />
+                <p className='text-[11px] font-semibold uppercase tracking-[0.2em] text-muted-foreground'>
+                  {BRAND_NAME}
                 </p>
               </div>
-              <h1 className='login-title text-3xl font-semibold tracking-tight text-foreground'>
-                Sign in by email
+              <h1 className='login-title text-xl font-semibold tracking-tight text-foreground'>
+                {t('magic_link.form.title')}
               </h1>
               <p className='text-sm text-muted-foreground'>
-                Enter your email address and we&apos;ll send you a link to sign in instantly.
+                {t('magic_link.form.description')}
               </p>
             </div>
             <FormField
@@ -270,7 +300,7 @@ function MagicLinkFormView({
               render={({ field }) => (
                 <InputText
                   {...field}
-                  label='Email address'
+                  label={t('magic_link.form.email_label')}
                   name='email'
                   type='email'
                   className='w-full'
@@ -281,10 +311,10 @@ function MagicLinkFormView({
             />
             <Button
               type='submit'
-              className='w-full rounded-lg py-5 text-sm'
+              className='h-10 w-full rounded-lg text-sm'
               disabled={isLoading}
             >
-              {isLoading ? 'Sending...' : 'Send magic link'}
+              {isLoading ? t('magic_link.form.submitting') : t('magic_link.form.submit')}
             </Button>
           </div>
         </div>
@@ -294,31 +324,31 @@ function MagicLinkFormView({
 }
 
 function MagicLinkSentView({ onBack }: { onBack?: () => void }) {
+  const { t } = useTranslation(AUTH_NAMESPACE)
+
   return (
-    <div className='p-8 md:p-10'>
-      <div className='flex flex-col items-center gap-6 text-center'>
+    <div className='p-6'>
+      <div className='flex flex-col items-center gap-4 text-center'>
         <div className='flex items-center gap-3 self-start'>
-          <img src='/logo_ferriskey.png' alt='FerrisKey' className='h-7 w-7 object-contain' />
-          <p className='text-xs font-semibold uppercase tracking-[0.35em] text-muted-foreground'>
-            FerrisKey
+          <img src='/logo_ferriskey.png' alt={BRAND_NAME} className='h-5 w-5 object-contain' />
+          <p className='text-[11px] font-semibold uppercase tracking-[0.2em] text-muted-foreground'>
+            {BRAND_NAME}
           </p>
         </div>
-        <div className='flex h-14 w-14 items-center justify-center rounded-full bg-primary/10'>
-          <Mail className='h-7 w-7 text-primary' />
+        <div className='flex h-11 w-11 items-center justify-center rounded-full bg-primary/10'>
+          <Mail className='h-5 w-5 text-primary' />
         </div>
-        <div className='space-y-2'>
-          <h1 className='text-2xl font-semibold tracking-tight text-foreground'>Check your inbox</h1>
-          <p className='text-sm text-muted-foreground'>
-            We sent a magic link to your email address. Click the link to sign in — no password needed.
-          </p>
-          <p className='text-xs text-muted-foreground'>
-            The link expires in 15 minutes. Check your spam folder if you don&apos;t see it.
-          </p>
+        <div className='space-y-1.5'>
+          <h1 className='text-lg font-semibold tracking-tight text-foreground'>
+            {t('magic_link.sent.title')}
+          </h1>
+          <p className='text-sm text-muted-foreground'>{t('magic_link.sent.description')}</p>
+          <p className='text-xs text-muted-foreground'>{t('magic_link.sent.hint')}</p>
         </div>
         {onBack && (
-          <Button variant='outline' onClick={onBack} className='w-full rounded-lg py-5 text-sm'>
+          <Button variant='outline' onClick={onBack} className='h-10 w-full rounded-lg text-sm'>
             <ArrowLeft className='mr-2 h-4 w-4' />
-            Back to login
+            {t('actions.back_to_login')}
           </Button>
         )}
       </div>
@@ -327,47 +357,51 @@ function MagicLinkSentView({ onBack }: { onBack?: () => void }) {
 }
 
 function ErrorMessage() {
+  const { t } = useTranslation(AUTH_NAMESPACE)
+
   return (
     <div className='flex min-h-svh flex-col items-center justify-center'>
-      <p className='text-lg font-semibold text-destructive'>An error occurred during login</p>
-      <p className='text-muted-foreground'>Please try again</p>
+      <p className='text-lg font-semibold text-destructive'>{t('login.failure.title')}</p>
+      <p className='text-muted-foreground'>{t('login.failure.description')}</p>
     </div>
   )
 }
 
 export function LoginErrorPage({ errorMessage }: { errorMessage: string }) {
+  const { t } = useTranslation(AUTH_NAMESPACE)
+
   return (
     <div className='login-shell relative flex min-h-svh items-center justify-center px-6 py-10'>
-      <div className='relative z-10 w-full max-w-sm md:max-w-md lg:max-w-lg'>
+      <div className='relative z-10 w-full max-w-[380px]'>
         <div className='flex flex-col gap-6'>
           <Card className='login-card overflow-hidden border p-0 shadow-sm'>
             <CardContent className='grid gap-0 p-0'>
-              <div className='p-8 md:p-10'>
-                <div className='flex flex-col gap-7'>
-                  <div className='space-y-2'>
-                    <div className='flex items-center gap-3'>
+              <div className='p-6'>
+                <div className='flex flex-col gap-5'>
+                  <div className='space-y-1.5'>
+                    <div className='flex items-center gap-2'>
                       <img
                         src='/logo_ferriskey.png'
-                        alt='FerrisKey'
-                        className='h-7 w-7 object-contain'
+                        alt={BRAND_NAME}
+                        className='h-5 w-5 object-contain'
                       />
-                      <p className='text-xs font-semibold uppercase tracking-[0.35em] text-muted-foreground'>
-                        FerrisKey
+                      <p className='text-[11px] font-semibold uppercase tracking-[0.2em] text-muted-foreground'>
+                        {BRAND_NAME}
                       </p>
                     </div>
-                    <h1 className='login-title text-3xl font-semibold tracking-tight text-foreground'>
-                      Authentication error
+                    <h1 className='login-title text-xl font-semibold tracking-tight text-foreground'>
+                      {t('login.rejected.title')}
                     </h1>
                   </div>
 
                   <div className='flex flex-col items-center gap-4 py-2'>
-                    <div className='flex h-12 w-12 items-center justify-center rounded-full bg-destructive/10'>
-                      <ShieldAlert className='h-6 w-6 text-destructive' />
+                    <div className='flex h-10 w-10 items-center justify-center rounded-full bg-destructive/10'>
+                      <ShieldAlert className='h-5 w-5 text-destructive' />
                     </div>
                     <div className='space-y-1 text-center'>
                       <p className='text-sm font-medium text-foreground'>{errorMessage}</p>
                       <p className='text-xs text-muted-foreground'>
-                        Contact your administrator if this problem persists.
+                        {t('login.rejected.hint')}
                       </p>
                     </div>
                   </div>

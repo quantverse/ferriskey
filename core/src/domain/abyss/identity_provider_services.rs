@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tracing::{instrument, warn};
+use tracing::instrument;
 use uuid::Uuid;
 
 use crate::domain::authentication::value_objects::Identity;
 use crate::domain::common::entities::app_errors::CoreError;
 use crate::domain::common::policies::ensure_policy;
-use crate::domain::realm::entities::Realm;
+use crate::domain::realm::entities::{RealmScope, Scoped, Unscoped};
 use crate::domain::realm::ports::RealmRepository;
 use crate::domain::seawatch::{
     EventStatus, SecurityEvent, SecurityEventRepository, SecurityEventType,
@@ -90,43 +90,33 @@ where
         identity: &Identity,
         realm_name: &str,
         user_id: Uuid,
-    ) -> Result<(Realm, User), CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+    ) -> Result<(RealmScope, Scoped<User>), CoreError> {
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), realm_name).await?;
 
         ensure_policy(
             self.identity_provider_policy
-                .can_update_user(identity, &realm)
+                .can_update_user(identity, scope.realm())
                 .await,
             "insufficient permissions to manage identity provider links",
         )?;
 
-        let user = self.user_repository.get_by_id(user_id).await?;
+        let user = self
+            .user_repository
+            .get_by_id(user_id)
+            .await?
+            .in_realm(&scope)?;
 
-        if user.realm_id != realm.id {
-            warn!(
-                user_id = %user_id,
-                user_realm_id = %Uuid::from(user.realm_id),
-                request_realm_id = %Uuid::from(realm.id),
-                "Refused cross-realm access to identity provider links"
-            );
-            return Err(CoreError::NotFound);
-        }
-
-        Ok((realm, user))
+        Ok((scope, user))
     }
 
     async fn load_links_in_realm(
         &self,
-        realm: &Realm,
-        user_id: Uuid,
+        scope: &RealmScope,
+        user: &Scoped<User>,
     ) -> Result<Vec<(IdentityProviderLink, String)>, CoreError> {
         let aliases = self
             .identity_provider_repository
-            .list_identity_providers_by_realm(realm.id, None)
+            .list_identity_providers_by_realm(scope.id(), None)
             .await?
             .into_iter()
             .map(|provider| (provider.id.as_uuid(), provider.alias))
@@ -134,7 +124,7 @@ where
 
         let links = self
             .identity_provider_link_repository
-            .get_by_user_id(user_id)
+            .get_by_user_id(user)
             .await?
             .into_iter()
             .filter_map(|link| {
@@ -173,16 +163,12 @@ where
         input: CreateIdentityProviderInput,
     ) -> Result<IdentityProvider, CoreError> {
         // Resolve realm by name
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
 
         // Check authorization
         ensure_policy(
             self.identity_provider_policy
-                .can_create_identity_provider(&identity, &realm)
+                .can_create_identity_provider(&identity, scope.realm())
                 .await,
             "insufficient permissions to create identity provider",
         )?;
@@ -190,7 +176,7 @@ where
         // Check if alias already exists in realm
         let exists = self
             .identity_provider_repository
-            .exists_identity_provider_by_realm_and_alias(realm.id, &input.alias)
+            .exists_identity_provider_by_realm_and_alias(scope.id(), &input.alias)
             .await?;
 
         if exists {
@@ -199,7 +185,7 @@ where
 
         // Create the identity provider
         let request = CreateIdentityProviderRequest {
-            realm_id: realm.id,
+            realm_id: scope.id(),
             alias: input.alias,
             provider_id: input.provider_id,
             enabled: input.enabled,
@@ -233,23 +219,19 @@ where
         input: GetIdentityProviderInput,
     ) -> Result<IdentityProvider, CoreError> {
         // Resolve realm by name
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
 
         // Get the identity provider
         let provider = self
             .identity_provider_repository
-            .get_identity_provider_by_realm_and_alias(realm.id, &input.alias)
+            .get_identity_provider_by_realm_and_alias(scope.id(), &input.alias)
             .await?
             .ok_or(CoreError::ProviderNotFound)?;
 
         // Check authorization
         ensure_policy(
             self.identity_provider_policy
-                .can_view_identity_provider(&identity, &realm)
+                .can_view_identity_provider(&identity, scope.realm())
                 .await,
             "insufficient permissions to view identity provider",
         )?;
@@ -271,16 +253,12 @@ where
         input: ListIdentityProvidersInput,
     ) -> Result<Vec<IdentityProvider>, CoreError> {
         // Resolve realm by name
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
 
         // Get all identity providers for the realm
         let providers = self
             .identity_provider_repository
-            .list_identity_providers_by_realm(realm.id, None)
+            .list_identity_providers_by_realm(scope.id(), None)
             .await?;
 
         // Filter based on view permission
@@ -288,7 +266,7 @@ where
         for provider in providers {
             if self
                 .identity_provider_policy
-                .can_view_identity_provider(&identity, &realm)
+                .can_view_identity_provider(&identity, scope.realm())
                 .await
                 .unwrap_or(false)
             {
@@ -314,23 +292,21 @@ where
         input: UpdateIdentityProviderInput,
     ) -> Result<IdentityProvider, CoreError> {
         // Resolve realm by name
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
 
         // Get the identity provider
         let provider = self
             .identity_provider_repository
-            .get_identity_provider_by_realm_and_alias(realm.id, &input.alias)
+            .get_identity_provider_by_realm_and_alias(scope.id(), &input.alias)
             .await?
-            .ok_or(CoreError::ProviderNotFound)?;
+            .map(Unscoped::new)
+            .ok_or(CoreError::ProviderNotFound)?
+            .in_realm(&scope)?;
 
         // Check authorization
         ensure_policy(
             self.identity_provider_policy
-                .can_update_identity_provider(&identity, &realm)
+                .can_update_identity_provider(&identity, scope.realm())
                 .await,
             "insufficient permissions to update identity provider",
         )?;
@@ -346,10 +322,11 @@ where
             trust_email: input.trust_email,
             link_only: input.link_only,
             config: input.config,
+            patch: input.patch,
         };
 
         self.identity_provider_repository
-            .update_identity_provider(provider.id.into(), request)
+            .update_identity_provider(&provider, request)
             .await
     }
 
@@ -368,29 +345,27 @@ where
         input: DeleteIdentityProviderInput,
     ) -> Result<(), CoreError> {
         // Resolve realm by name
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
 
         // Get the identity provider
         let provider = self
             .identity_provider_repository
-            .get_identity_provider_by_realm_and_alias(realm.id, &input.alias)
+            .get_identity_provider_by_realm_and_alias(scope.id(), &input.alias)
             .await?
-            .ok_or(CoreError::ProviderNotFound)?;
+            .map(Unscoped::new)
+            .ok_or(CoreError::ProviderNotFound)?
+            .in_realm(&scope)?;
 
         // Check authorization
         ensure_policy(
             self.identity_provider_policy
-                .can_delete_identity_provider(&identity, &realm)
+                .can_delete_identity_provider(&identity, scope.realm())
                 .await,
             "insufficient permissions to delete identity provider",
         )?;
 
         self.identity_provider_repository
-            .delete_identity_provider(provider.id.into())
+            .delete_identity_provider(&provider)
             .await
     }
 
@@ -408,11 +383,11 @@ where
         identity: Identity,
         input: ListIdentityProviderLinksInput,
     ) -> Result<Vec<IdentityProviderLinkView>, CoreError> {
-        let (realm, user) = self
+        let (scope, user) = self
             .resolve_user_for_link_management(&identity, &input.realm_name, input.user_id)
             .await?;
 
-        let links = self.load_links_in_realm(&realm, user.id).await?;
+        let links = self.load_links_in_realm(&scope, &user).await?;
 
         Ok(links
             .into_iter()
@@ -442,12 +417,12 @@ where
         identity: Identity,
         input: DeleteIdentityProviderLinkInput,
     ) -> Result<(), CoreError> {
-        let (realm, user) = self
+        let (scope, user) = self
             .resolve_user_for_link_management(&identity, &input.realm_name, input.user_id)
             .await?;
 
         let (link, alias) = self
-            .load_links_in_realm(&realm, user.id)
+            .load_links_in_realm(&scope, &user)
             .await?
             .into_iter()
             .find(|(link, _)| link.id == input.link_id)
@@ -456,21 +431,21 @@ where
         self.security_event_repository
             .store_event(
                 SecurityEvent::new(
-                    realm.id,
+                    scope.id(),
                     SecurityEventType::IdentityProviderLinkRemoved,
                     EventStatus::Success,
                     identity.id(),
                 )
                 .with_target("identity_provider_link".to_string(), link.id, Some(alias))
                 .with_details(serde_json::json!({
-                    "user_id": user.id,
+                    "user_id": user.get().id,
                     "identity_provider_id": link.identity_provider_id.as_uuid(),
                 })),
             )
             .await?;
 
         self.identity_provider_link_repository
-            .delete(link.id)
+            .delete(&user, link.id)
             .await?;
 
         Ok(())

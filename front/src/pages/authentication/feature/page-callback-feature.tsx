@@ -2,15 +2,14 @@ import { GrantType } from '@/api/core.interface'
 import { useTokenMutation } from '@/api/auth.api'
 import { useAuth } from '@/hooks/use-auth'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useNavigate, useParams } from 'react-router-dom'
 import PageCallback from '../ui/page-callback'
-import {
-  buildLoginErrorRedirect,
-  getTokenExchangeErrorMessage,
-  validateCallbackParams,
-} from './callback-helpers'
+import { buildLoginErrorRedirect, validateCallbackParams } from './callback-helpers'
+import { apiErrorMessage } from '@/lib/api-error'
 import { POST_LOGIN_RETURN_KEY } from './page-device-verify-feature'
 import { takeOAuthFlow } from '../utils/pkce'
+import { AUTH_NAMESPACE } from '../constants'
 
 // Only allow returning to in-app paths to avoid an open-redirect via the
 // sessionStorage channel.
@@ -26,8 +25,20 @@ function safePostLoginReturn(realm: string): string | null {
   }
 }
 
+/**
+ * Orchestrates the return to `/authentication/callback?code=…&state=…`:
+ *
+ *  1. Checks the returned `state` against the `oauth_state:*` marker left
+ *     by whoever started the flow (login page or identity provider button).
+ *  2. Exchanges the code with the PKCE verifier and the exact `redirect_uri`
+ *     stored for that state — both are single-use and consumed even when
+ *     validation fails.
+ *  3. Stores the tokens and redirects to the post-login destination, or back
+ *     to the login page with the error.
+ */
 export default function PageCallbackFeature() {
   const navigate = useNavigate()
+  const { t } = useTranslation(AUTH_NAMESPACE)
 
   const urlParams = useMemo(() => new URLSearchParams(window.location.search), [])
   const code = useMemo(() => {
@@ -60,8 +71,11 @@ export default function PageCallbackFeature() {
   useEffect(() => {
     if (callbackValidationError) {
       if (state) localStorage.removeItem(`oauth_state:${state}`)
+      takeOAuthFlow(state)
       document.cookie = 'FERRISKEY_SESSION=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/;'
-      navigate(buildLoginErrorRedirect(realm_name, callbackValidationError), { replace: true })
+      navigate(buildLoginErrorRedirect(realm_name, t(`callback.${callbackValidationError}`)), {
+        replace: true,
+      })
       return
     }
 
@@ -93,11 +107,11 @@ export default function PageCallbackFeature() {
         navigate(returnTo ?? `/realms/${realm}/overview`, { replace: true })
       })
       .catch((error: unknown) => {
-        const message = getTokenExchangeErrorMessage(error)
+        const message = apiErrorMessage(error, t('callback.failed'))
         document.cookie = 'FERRISKEY_SESSION=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/;'
         navigate(buildLoginErrorRedirect(realm_name, message), { replace: true })
       })
-  }, [callbackValidationError, code, exchangeToken, navigate, realm_name, setAuthTokens, state])
+  }, [callbackValidationError, code, exchangeToken, navigate, realm_name, setAuthTokens, state, t])
 
   return <PageCallback code={code} setup={setup} />
 }

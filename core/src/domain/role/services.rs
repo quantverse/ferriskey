@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+use tracing::warn;
+use uuid::Uuid;
+
 use crate::domain::{
     authentication::value_objects::Identity,
     client::ports::ClientRepository,
@@ -7,9 +10,12 @@ use crate::domain::{
         entities::app_errors::CoreError,
         policies::{FerriskeyPolicy, ensure_policy},
     },
-    realm::ports::RealmRepository,
+    realm::{
+        entities::{RealmScope, Scoped},
+        ports::RealmRepository,
+    },
     role::{
-        entities::{CreateRoleInput, GetUserRolesInput, Role, UpdateRoleInput},
+        entities::{CreateRoleInput, Role, UpdateRoleInput},
         ports::{RolePolicy, RoleRepository, RoleService},
         value_objects::{CreateRoleRequest, UpdateRolePermissionsRequest, UpdateRoleRequest},
     },
@@ -36,8 +42,6 @@ where
     pub(crate) role_repository: Arc<RO>,
     pub(crate) security_event_repository: Arc<SE>,
     pub(crate) webhook_repository: Arc<W>,
-    pub(crate) user_role_repository: Arc<UR>,
-
     pub(crate) policy: Arc<FerriskeyPolicy<U, C, UR>>,
 }
 
@@ -56,7 +60,6 @@ where
         role_repository: Arc<RO>,
         security_event_repository: Arc<SE>,
         webhook_repository: Arc<W>,
-        user_role_repository: Arc<UR>,
         policy: Arc<FerriskeyPolicy<U, C, UR>>,
     ) -> Self {
         Self {
@@ -64,9 +67,23 @@ where
             role_repository,
             security_event_repository,
             webhook_repository,
-            user_role_repository,
             policy,
         }
+    }
+
+    async fn load_role_in_realm(
+        &self,
+        role_id: Uuid,
+        scope: &RealmScope,
+    ) -> Result<Scoped<Role>, CoreError> {
+        self.role_repository
+            .get_by_id(role_id)
+            .await?
+            .ok_or_else(|| {
+                warn!(role_id = %role_id, "Role not found");
+                CoreError::NotFound
+            })?
+            .in_realm(scope)
     }
 }
 
@@ -85,18 +102,24 @@ where
         identity: Identity,
         input: CreateRoleInput,
     ) -> Result<Role, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
         let realm_id = realm.id;
         ensure_policy(
             self.policy.can_create_role(&identity, &realm).await,
             "insufficient permissions",
         )?;
+
+        if !self
+            .policy
+            .can_grant_permissions(&identity, &realm, &input.permissions)
+            .await?
+        {
+            return Err(CoreError::Forbidden(
+                "cannot grant a permission you do not hold".to_string(),
+            ));
+        }
 
         let role = self
             .role_repository
@@ -139,12 +162,8 @@ where
         realm_name: String,
         role_id: uuid::Uuid,
     ) -> Result<(), CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&realm_name)
-            .await
-            .map_err(|_| CoreError::InternalServerError)?
-            .ok_or(CoreError::InternalServerError)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &realm_name).await?;
+        let realm = scope.realm().clone();
 
         let realm_id = realm.id;
         ensure_policy(
@@ -152,8 +171,8 @@ where
             "insufficient permissions",
         )?;
 
-        let role = self.role_repository.get_by_id(role_id).await?;
-        self.role_repository.delete_by_id(role_id).await?;
+        let role = self.load_role_in_realm(role_id, &scope).await?;
+        self.role_repository.delete_by_id(&role).await?;
 
         self.security_event_repository
             .store_event(SecurityEvent::new(
@@ -167,7 +186,11 @@ where
         self.webhook_repository
             .notify(
                 realm_id,
-                WebhookPayload::new(WebhookTrigger::RoleDeleted, realm_id.into(), Some(role)),
+                WebhookPayload::new(
+                    WebhookTrigger::RoleDeleted,
+                    realm_id.into(),
+                    Some(role.into_inner()),
+                ),
             )
             .await?;
 
@@ -180,23 +203,17 @@ where
         realm_name: String,
         role_id: uuid::Uuid,
     ) -> Result<Role, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&realm_name)
-            .await
-            .map_err(|_| CoreError::InternalServerError)?
-            .ok_or(CoreError::InternalServerError)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &realm_name).await?;
+        let realm = scope.realm().clone();
 
         ensure_policy(
             self.policy.can_view_role(&identity, &realm).await,
             "insufficient permissions",
         )?;
 
-        self.role_repository
-            .get_by_id(role_id)
+        self.load_role_in_realm(role_id, &scope)
             .await
-            .map_err(|_| CoreError::NotFound)?
-            .ok_or(CoreError::NotFound)
+            .map(Scoped::into_inner)
     }
 
     async fn get_roles(
@@ -204,12 +221,8 @@ where
         identity: Identity,
         realm_name: String,
     ) -> Result<Vec<Role>, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&realm_name)
-            .await
-            .map_err(|_| CoreError::InternalServerError)?
-            .ok_or(CoreError::InternalServerError)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &realm_name).await?;
+        let realm = scope.realm().clone();
 
         let realm_id = realm.id;
         ensure_policy(
@@ -223,40 +236,13 @@ where
             .map_err(|_| CoreError::NotFound)
     }
 
-    async fn get_user_roles(
-        &self,
-        identity: Identity,
-        input: GetUserRolesInput,
-    ) -> Result<Vec<Role>, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InternalServerError)?
-            .ok_or(CoreError::InternalServerError)?;
-
-        ensure_policy(
-            self.policy.can_view_role(&identity, &realm).await,
-            "insufficient permissions",
-        )?;
-
-        self.user_role_repository
-            .get_user_roles(input.user_id)
-            .await
-            .map_err(|_| CoreError::InternalServerError)
-    }
-
     async fn update_role(
         &self,
         identity: Identity,
         input: UpdateRoleInput,
     ) -> Result<Role, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InternalServerError)?
-            .ok_or(CoreError::InternalServerError)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
         let realm_id = realm.id;
         ensure_policy(
@@ -264,10 +250,12 @@ where
             "insufficient permissions",
         )?;
 
+        let scoped = self.load_role_in_realm(input.role_id, &scope).await?;
+
         let role = self
             .role_repository
             .update_by_id(
-                input.role_id,
+                &scoped,
                 UpdateRoleRequest {
                     description: input.description,
                     name: input.name,
@@ -276,6 +264,15 @@ where
             )
             .await
             .map_err(|_| CoreError::InternalServerError)?;
+
+        self.security_event_repository
+            .store_event(SecurityEvent::new(
+                realm_id,
+                SecurityEventType::RoleUpdated,
+                EventStatus::Success,
+                identity.id(),
+            ))
+            .await?;
 
         self.webhook_repository
             .notify(
@@ -298,12 +295,8 @@ where
         role_id: uuid::Uuid,
         permissions: Vec<String>,
     ) -> Result<Role, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&realm_name)
-            .await
-            .map_err(|_| CoreError::InternalServerError)?
-            .ok_or(CoreError::InternalServerError)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &realm_name).await?;
+        let realm = scope.realm().clone();
 
         let realm_id = realm.id;
 
@@ -312,11 +305,32 @@ where
             "insufficient permissions",
         )?;
 
+        if !self
+            .policy
+            .can_grant_permissions(&identity, &realm, &permissions)
+            .await?
+        {
+            return Err(CoreError::Forbidden(
+                "cannot grant a permission you do not hold".to_string(),
+            ));
+        }
+
+        let scoped = self.load_role_in_realm(role_id, &scope).await?;
+
         let role = self
             .role_repository
-            .update_permissions_by_id(role_id, UpdateRolePermissionsRequest { permissions })
+            .update_permissions_by_id(&scoped, UpdateRolePermissionsRequest { permissions })
             .await
             .map_err(|_| CoreError::InternalServerError)?;
+
+        self.security_event_repository
+            .store_event(SecurityEvent::new(
+                realm_id,
+                SecurityEventType::RolePermissionUpdated,
+                EventStatus::Success,
+                identity.id(),
+            ))
+            .await?;
 
         self.webhook_repository
             .notify(
@@ -351,11 +365,11 @@ mod tests {
             },
         },
         realm::{
-            entities::{Realm, RealmId},
+            entities::{Realm, RealmId, Scoped, Unscoped},
             ports::MockRealmRepository,
         },
         role::{
-            entities::{CreateRoleInput, Role, permission::Permissions},
+            entities::{CreateRoleInput, Role, UpdateRoleInput, permission::Permissions},
             ports::{MockRoleRepository, RoleService},
             services::RoleServiceImpl,
             value_objects::CreateRoleRequest,
@@ -419,7 +433,7 @@ mod tests {
                 .expect_get_by_id()
                 .with(eq(role_id))
                 .times(1)
-                .return_once(move |_| Box::pin(async move { Ok(Some(role)) }));
+                .return_once(move |_| Box::pin(async move { Ok(Some(Unscoped::new(role))) }));
             self
         }
 
@@ -438,8 +452,10 @@ mod tests {
                 .unwrap()
                 .expect_get_user_roles()
                 .with(eq(user_id))
-                .times(1)
-                .return_once(move |_| Box::pin(async move { Ok(roles) }));
+                .returning(move |_| {
+                    let roles = roles.clone();
+                    Box::pin(async move { Ok(roles) })
+                });
             self
         }
 
@@ -462,7 +478,33 @@ mod tests {
                 .expect_get_by_client_id()
                 .with(eq(client_id.to_string()), eq(realm_id))
                 .times(1)
-                .return_once(move |_, _| Box::pin(async move { Ok(client) }));
+                .return_once(move |_, _| Box::pin(async move { Ok(Unscoped::new(client)) }));
+            self
+        }
+
+        fn with_successful_role_update(mut self, role_id: Uuid, role: Role) -> Self {
+            Arc::get_mut(&mut self.role_repo)
+                .unwrap()
+                .expect_update_by_id()
+                .with(
+                    function(move |role: &Scoped<Role>| role.get().id == role_id),
+                    always(),
+                )
+                .times(1)
+                .return_once(move |_, _| Box::pin(async move { Ok(role) }));
+            self
+        }
+
+        fn with_successful_role_permissions_update(mut self, role_id: Uuid, role: Role) -> Self {
+            Arc::get_mut(&mut self.role_repo)
+                .unwrap()
+                .expect_update_permissions_by_id()
+                .with(
+                    function(move |role: &Scoped<Role>| role.get().id == role_id),
+                    always(),
+                )
+                .times(1)
+                .return_once(move |_, _| Box::pin(async move { Ok(role) }));
             self
         }
 
@@ -505,7 +547,6 @@ mod tests {
                 self.role_repo,
                 self.security_event_repo,
                 self.webhook_repo,
-                self.user_role_repo,
                 Arc::new(policy),
             )
         }
@@ -786,5 +827,258 @@ mod tests {
 
         let returned_role = assert_success(result);
         assert_eq!(returned_role.id, role_in_target.id);
+    }
+
+    #[tokio::test]
+    async fn test_get_role_scoped_to_url_realm_returns_not_found() {
+        let principal_realm = create_test_realm_with_name("principal");
+        let neighbor_realm = create_test_realm_with_name("neighbor");
+        let admin = create_test_user_with_realm(&principal_realm);
+        let identity = Identity::User(admin.clone());
+
+        let admin_role = create_test_role_with_params(
+            principal_realm.id,
+            "principal-viewer",
+            vec![Permissions::ViewRoles.name()],
+            None,
+        );
+
+        let foreign_role = create_test_role(neighbor_realm.id);
+
+        let service = RoleServiceTestBuilder::new()
+            .with_successful_realm_lookup(&principal_realm.name, principal_realm.clone())
+            .with_user_roles(admin.id, vec![admin_role])
+            .with_successful_role_lookup(foreign_role.id, foreign_role.clone())
+            .build();
+
+        let result = service
+            .get_role(identity, principal_realm.name.clone(), foreign_role.id)
+            .await;
+
+        assert!(matches!(result.unwrap_err(), CoreError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn test_delete_role_scoped_to_url_realm_returns_not_found() {
+        let principal_realm = create_test_realm_with_name("principal");
+        let neighbor_realm = create_test_realm_with_name("neighbor");
+        let admin = create_test_user_with_realm(&principal_realm);
+        let identity = Identity::User(admin.clone());
+
+        let admin_role = create_test_role_with_params(
+            principal_realm.id,
+            "principal-manager",
+            vec![Permissions::ManageRoles.name()],
+            None,
+        );
+
+        let foreign_role = create_test_role(neighbor_realm.id);
+
+        let service = RoleServiceTestBuilder::new()
+            .with_successful_realm_lookup(&principal_realm.name, principal_realm.clone())
+            .with_user_roles(admin.id, vec![admin_role])
+            .with_successful_role_lookup(foreign_role.id, foreign_role.clone())
+            .build();
+
+        let result = service
+            .delete_role(identity, principal_realm.name.clone(), foreign_role.id)
+            .await;
+
+        assert!(matches!(result.unwrap_err(), CoreError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn test_update_role_records_a_security_event() {
+        let realm = create_test_realm();
+        let user = create_test_user_with_realm(&realm);
+        let identity = Identity::User(user.clone());
+        let role = create_test_role(realm.id);
+        let admin_role = create_test_role_with_params(
+            realm.id,
+            "realm-admin",
+            vec![Permissions::ManageRealm.name()],
+            None,
+        );
+        let updated = create_test_role_with_params(realm.id, "renamed-role", vec![], None);
+
+        let service = RoleServiceTestBuilder::new()
+            .with_successful_realm_lookup(&realm.name, realm.clone())
+            .with_user_roles(user.id, vec![admin_role])
+            .with_successful_role_lookup(role.id, role.clone())
+            .with_successful_role_update(role.id, updated.clone())
+            .with_security_event_store()
+            .with_role_webhook_notify()
+            .build();
+
+        let result = service
+            .update_role(
+                identity,
+                UpdateRoleInput {
+                    realm_name: realm.name.clone(),
+                    role_id: role.id,
+                    name: Some("renamed-role".to_string()),
+                    description: None,
+                    require_mfa: None,
+                },
+            )
+            .await;
+
+        let returned = assert_success(result);
+        assert_eq!(returned.name, "renamed-role");
+    }
+
+    #[tokio::test]
+    async fn test_update_role_permissions_records_a_security_event() {
+        let realm = create_test_realm();
+        let user = create_test_user_with_realm(&realm);
+        let identity = Identity::User(user.clone());
+        let role = create_test_role(realm.id);
+        let admin_role = create_test_role_with_params(
+            realm.id,
+            "realm-admin",
+            vec![Permissions::ManageRealm.name()],
+            None,
+        );
+        let updated = create_test_role_with_params(
+            realm.id,
+            "test-role",
+            vec![Permissions::ManageUsers.name()],
+            None,
+        );
+
+        let service = RoleServiceTestBuilder::new()
+            .with_successful_realm_lookup(&realm.name, realm.clone())
+            .with_user_roles(user.id, vec![admin_role])
+            .with_successful_role_lookup(role.id, role.clone())
+            .with_successful_role_permissions_update(role.id, updated.clone())
+            .with_security_event_store()
+            .with_role_webhook_notify()
+            .build();
+
+        let result = service
+            .update_role_permissions(
+                identity,
+                realm.name.clone(),
+                role.id,
+                vec![Permissions::ManageUsers.name()],
+            )
+            .await;
+
+        let returned = assert_success(result);
+        assert_eq!(returned.permissions, vec![Permissions::ManageUsers.name()]);
+    }
+
+    #[tokio::test]
+    async fn test_manage_users_reads_roles_but_cannot_create_them() {
+        let realm = create_test_realm();
+        let user = create_test_user_with_realm(&realm);
+        let identity = Identity::User(user.clone());
+        let user_admin = create_test_role_with_params(
+            realm.id,
+            "user-admin",
+            vec![Permissions::ManageUsers.name()],
+            None,
+        );
+
+        // No `with_successful_role_create`: the mock panics if creation is reached.
+        let service = RoleServiceTestBuilder::new()
+            .with_successful_realm_lookup(&realm.name, realm.clone())
+            .with_user_roles(user.id, vec![user_admin])
+            .build();
+
+        let result = service
+            .create_role(
+                identity,
+                CreateRoleInput {
+                    realm_name: realm.name,
+                    name: "anything".to_string(),
+                    description: None,
+                    permissions: vec![],
+                },
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(CoreError::Forbidden(_))),
+            "manage_users must no longer edit roles, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_manage_roles_cannot_grant_a_permission_it_does_not_hold() {
+        let realm = create_test_realm();
+        let user = create_test_user_with_realm(&realm);
+        let identity = Identity::User(user.clone());
+        let role = create_test_role(realm.id);
+        let role_admin = create_test_role_with_params(
+            realm.id,
+            "role-admin",
+            vec![Permissions::ManageRoles.name()],
+            None,
+        );
+
+        // The guard runs before the role is even loaded: no lookup, no write.
+        let service = RoleServiceTestBuilder::new()
+            .with_successful_realm_lookup(&realm.name, realm.clone())
+            .with_user_roles(user.id, vec![role_admin])
+            .build();
+
+        let result = service
+            .update_role_permissions(
+                identity,
+                realm.name.clone(),
+                role.id,
+                vec![Permissions::ManageRealm.name()],
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(CoreError::Forbidden(_))),
+            "granting manage_realm without holding it is an escalation, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_manage_roles_grants_what_it_holds() {
+        let realm = create_test_realm();
+        let user = create_test_user_with_realm(&realm);
+        let identity = Identity::User(user.clone());
+        let role = create_test_role(realm.id);
+        let role_admin = create_test_role_with_params(
+            realm.id,
+            "role-admin",
+            vec![
+                Permissions::ManageRoles.name(),
+                Permissions::ViewUsers.name(),
+            ],
+            None,
+        );
+        let updated = create_test_role_with_params(
+            realm.id,
+            "test-role",
+            vec![Permissions::ViewUsers.name()],
+            None,
+        );
+
+        let service = RoleServiceTestBuilder::new()
+            .with_successful_realm_lookup(&realm.name, realm.clone())
+            .with_user_roles(user.id, vec![role_admin])
+            .with_successful_role_lookup(role.id, role.clone())
+            .with_successful_role_permissions_update(role.id, updated.clone())
+            .with_security_event_store()
+            .with_role_webhook_notify()
+            .build();
+
+        let result = service
+            .update_role_permissions(
+                identity,
+                realm.name.clone(),
+                role.id,
+                vec![Permissions::ViewUsers.name()],
+            )
+            .await;
+
+        let returned = assert_success(result);
+        assert_eq!(returned.permissions, vec![Permissions::ViewUsers.name()]);
     }
 }

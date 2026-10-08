@@ -22,10 +22,13 @@ use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect, RelationTrait,
 };
 use tokio::sync::mpsc;
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::domain::common::generate_timestamp;
+use crate::domain::webhook::entities::retry_policy::{RetryPolicy, RetryPolicyOverride};
+use crate::domain::webhook::entities::webhook_delivery::WebhookDelivery;
 use crate::domain::webhook::entities::webhook_subscriber::WebhookSubscriber;
+use crate::domain::webhook::ports::WebhookDeliveryRepository;
 use crate::entity::webhook_subscribers::{
     ActiveModel as WebhookSubscriberActiveModel, Column as WebhookSubscriberColumn,
     Entity as WebhookSubscriberEntity,
@@ -34,23 +37,46 @@ use crate::entity::webhooks::{
     ActiveModel as WebhookActiveModel, Column as WebhookColumn, Entity as WebhookEntity,
     Relation as WebhookRelation,
 };
+use crate::infrastructure::seawatch::repositories::security_event_postgres_repository::PostgresSecurityEventRepository;
+use crate::infrastructure::webhook::repositories::webhook_delivery_repository::PostgresWebhookDeliveryRepository;
+use ferriskey_webhook::endpoint::PrivateEndpoints;
 
 use crate::entity::webhook_subscribers::Model as WebhookSubscriberModel;
 use crate::infrastructure::webhook::delivery::{self, DeliveryJob};
 
+fn as_column(value: Option<u32>) -> Option<i32> {
+    value.and_then(|value| i32::try_from(value).ok())
+}
+
+fn column_update(
+    policy: Option<RetryPolicyOverride>,
+    field: impl Fn(RetryPolicyOverride) -> Option<u32>,
+) -> sea_orm::ActiveValue<Option<i32>> {
+    match policy {
+        Some(policy) => Set(as_column(field(policy))),
+        None => sea_orm::ActiveValue::NotSet,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PostgresWebhookRepository {
     pub db: DatabaseConnection,
+    deliveries: PostgresWebhookDeliveryRepository,
     delivery_sender: mpsc::Sender<DeliveryJob>,
+    private_endpoints: PrivateEndpoints,
 }
 
 impl PostgresWebhookRepository {
-    pub fn new(db: DatabaseConnection) -> Self {
-        let delivery_sender = delivery::spawn_dispatcher(db.clone());
+    pub fn new(db: DatabaseConnection, private_endpoints: PrivateEndpoints) -> Self {
+        let deliveries = PostgresWebhookDeliveryRepository::new(db.clone());
+        let security_events = PostgresSecurityEventRepository::new(db.clone());
+        let delivery_sender = delivery::spawn_dispatcher(deliveries.clone(), security_events);
 
         Self {
             db,
+            deliveries,
             delivery_sender,
+            private_endpoints,
         }
     }
 }
@@ -132,6 +158,7 @@ impl WebhookRepository for PostgresWebhookRepository {
         endpoint: String,
         headers: HashMap<String, String>,
         subscribers: Vec<WebhookTrigger>,
+        retry_policy: RetryPolicyOverride,
     ) -> Result<Webhook, CoreError> {
         let (_, timestamp) = generate_timestamp();
         let subscription_id = Uuid::new_v7(timestamp);
@@ -150,6 +177,10 @@ impl WebhookRepository for PostgresWebhookRepository {
             last_delivery_error: Set(None),
             created_at: Set(Utc::now().naive_utc()),
             updated_at: Set(Utc::now().naive_utc()),
+            retry_max_attempts: Set(as_column(retry_policy.max_attempts)),
+            retry_base_delay_ms: Set(as_column(retry_policy.base_delay_ms)),
+            retry_max_delay_ms: Set(as_column(retry_policy.max_delay_ms)),
+            retry_max_total_delay_ms: Set(as_column(retry_policy.max_total_delay_ms)),
         })
         .exec_with_returning(&self.db)
         .await
@@ -159,23 +190,27 @@ impl WebhookRepository for PostgresWebhookRepository {
             CoreError::InternalServerError
         })?;
 
-        let subscribers_model: Vec<WebhookSubscriberModel> =
-            WebhookSubscriberEntity::insert_many(subscribers.iter().map(|value| {
-                WebhookSubscriberActiveModel {
-                    id: Set(Uuid::new_v7(timestamp)),
-                    name: Set(value.to_string()),
-                    webhook_id: Set(subscription_id),
-                }
-            }))
-            .exec_with_returning_many(&self.db)
-            .await
-            .map_err(|_| CoreError::InternalServerError)?;
+        let subscribers: Vec<WebhookSubscriber> = if subscribers.is_empty() {
+            Vec::new()
+        } else {
+            let subscribers_model: Vec<WebhookSubscriberModel> =
+                WebhookSubscriberEntity::insert_many(subscribers.iter().map(|value| {
+                    WebhookSubscriberActiveModel {
+                        id: Set(Uuid::new_v7(timestamp)),
+                        name: Set(value.to_string()),
+                        webhook_id: Set(subscription_id),
+                    }
+                }))
+                .exec_with_returning_many(&self.db)
+                .await
+                .map_err(|_| CoreError::InternalServerError)?;
 
-        let subscribers: Vec<WebhookSubscriber> = subscribers_model
-            .iter()
-            .map(|value| value.clone().try_into())
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| CoreError::InternalServerError)?;
+            subscribers_model
+                .iter()
+                .map(|value| value.clone().try_into())
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| CoreError::InternalServerError)?
+        };
 
         webhook.subscribers = subscribers;
         Ok(webhook)
@@ -188,18 +223,26 @@ impl WebhookRepository for PostgresWebhookRepository {
         name: Option<String>,
         description: Option<String>,
         endpoint: String,
-        headers: HashMap<String, String>,
+        headers: Option<HashMap<String, String>>,
         subscribers: Vec<WebhookTrigger>,
+        retry_policy: Option<RetryPolicyOverride>,
     ) -> Result<Webhook, CoreError> {
-        let headers_json = to_value(headers).unwrap_or_default();
-
         let update_result = WebhookEntity::update_many()
             .set(WebhookActiveModel {
                 name: Set(name),
                 description: Set(description),
                 endpoint: Set(endpoint),
-                headers: Set(headers_json),
+                // `NotSet` leaves the column alone — the caller said nothing
+                // about headers, so the stored ones stay.
+                headers: match headers {
+                    Some(headers) => Set(to_value(headers).unwrap_or_default()),
+                    None => sea_orm::ActiveValue::NotSet,
+                },
                 updated_at: Set(Utc::now().naive_utc()),
+                retry_max_attempts: column_update(retry_policy, |p| p.max_attempts),
+                retry_base_delay_ms: column_update(retry_policy, |p| p.base_delay_ms),
+                retry_max_delay_ms: column_update(retry_policy, |p| p.max_delay_ms),
+                retry_max_total_delay_ms: column_update(retry_policy, |p| p.max_total_delay_ms),
                 ..Default::default()
             })
             .filter(WebhookColumn::Id.eq(id))
@@ -274,11 +317,31 @@ impl WebhookRepository for PostgresWebhookRepository {
         Ok(())
     }
 
-    /// Enqueues a delivery job per matching webhook and returns without waiting for any of them
-    /// to be attempted. A full queue is shed rather than awaited: this method runs inline in
-    /// request-handling code paths (user creation, client updates, ...), and blocking those on a
-    /// backlog caused entirely by a slow or stuck third-party endpoint would turn an unrelated
-    /// API outage into a webhook-subsystem outage.
+    async fn rotate_secret(&self, realm_id: RealmId, id: Uuid) -> Result<String, CoreError> {
+        let secret = generate_secret();
+
+        let result = WebhookEntity::update_many()
+            .set(WebhookActiveModel {
+                secret: Set(secret.clone()),
+                updated_at: Set(Utc::now().naive_utc()),
+                ..Default::default()
+            })
+            .filter(WebhookColumn::Id.eq(id))
+            .filter(WebhookColumn::RealmId.eq::<Uuid>(realm_id.into()))
+            .exec(&self.db)
+            .await
+            .map_err(|e| {
+                error!("Failed to rotate webhook secret: {}", e);
+                CoreError::InternalServerError
+            })?;
+
+        if result.rows_affected == 0 {
+            return Err(CoreError::WebhookNotFound);
+        }
+
+        Ok(secret)
+    }
+
     async fn notify<T: Send + Sync + Serialize + Clone + 'static>(
         &self,
         realm_id: RealmId,
@@ -295,7 +358,19 @@ impl WebhookRepository for PostgresWebhookRepository {
             }
         };
 
-        let body = match serde_json::to_vec(&payload) {
+        if webhooks.is_empty() {
+            return Ok(());
+        }
+
+        let document = match to_value(&payload) {
+            Ok(document) => document,
+            Err(err) => {
+                error!("Failed to serialize webhook payload: {:?}", err);
+                return Ok(());
+            }
+        };
+
+        let body = match serde_json::to_vec(&document) {
             Ok(body) => std::sync::Arc::new(body),
             Err(err) => {
                 error!("Failed to serialize webhook payload: {:?}", err);
@@ -304,28 +379,61 @@ impl WebhookRepository for PostgresWebhookRepository {
         };
 
         for webhook in webhooks {
+            let delivery = WebhookDelivery::pending(
+                realm_id,
+                webhook.id,
+                payload.event.clone(),
+                payload.resource_id,
+                document.clone(),
+                Utc::now(),
+            );
+            let delivery_id = delivery.id;
+            let attempt_count = delivery.attempt_count;
+
+            if let Err(err) = self.deliveries.enqueue(delivery).await {
+                error!(
+                    webhook_id = %webhook.id,
+                    error = ?err,
+                    "failed to record a webhook delivery; the event is lost"
+                );
+                continue;
+            }
+
+            let policy = match self
+                .deliveries
+                .resolve_retry_policy(realm_id, webhook.id)
+                .await
+            {
+                Ok(policy) => policy,
+                Err(_) => RetryPolicy::SYSTEM_DEFAULT,
+            };
+
             let job = DeliveryJob {
+                delivery_id,
+                realm_id,
                 webhook_id: webhook.id,
+                event: payload.event.clone(),
                 endpoint: webhook.endpoint,
                 headers: webhook.headers,
                 secret: webhook.secret,
                 body: body.clone(),
+                attempt_count,
+                elapsed: std::time::Duration::ZERO,
+                policy,
+                private_endpoints: self.private_endpoints,
             };
 
-            match self.delivery_sender.try_send(job) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    error!(
-                        webhook_id = %webhook.id,
-                        "webhook delivery queue is full; dropping this delivery"
-                    );
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    error!(
-                        webhook_id = %webhook.id,
-                        "webhook delivery dispatcher is not running; dropping this delivery"
-                    );
-                }
+            if let Err(err) = self.delivery_sender.try_send(job) {
+                let reason = match err {
+                    mpsc::error::TrySendError::Full(_) => "queue is full",
+                    mpsc::error::TrySendError::Closed(_) => "dispatcher is not running",
+                };
+                warn!(
+                    webhook_id = %webhook.id,
+                    delivery_id = %delivery_id,
+                    reason,
+                    "deferring the first webhook delivery attempt to the outbox worker"
+                );
             }
         }
 
@@ -395,7 +503,7 @@ mod tests {
             .expect("sea-orm connect");
 
         (
-            PostgresWebhookRepository::new(db),
+            PostgresWebhookRepository::new(db, PrivateEndpoints::Forbidden),
             RealmId::from(realm_a),
             RealmId::from(realm_b),
         )
@@ -413,6 +521,7 @@ mod tests {
             endpoint.to_string(),
             HashMap::new(),
             vec![WebhookTrigger::UserCreated],
+            RetryPolicyOverride::default(),
         )
         .await
         .expect("create webhook")
@@ -433,8 +542,9 @@ mod tests {
                 Some("hijacked".to_string()),
                 None,
                 "https://attacker.example/hook".to_string(),
-                HashMap::new(),
+                Some(HashMap::new()),
                 Vec::new(),
+                None,
             )
             .await;
 
@@ -494,8 +604,9 @@ mod tests {
                 Some("renamed".to_string()),
                 None,
                 "https://example.com/updated".to_string(),
-                HashMap::new(),
+                Some(HashMap::new()),
                 vec![WebhookTrigger::UserDeleted],
+                None,
             )
             .await
             .expect("update webhook in its own realm");

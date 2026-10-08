@@ -40,6 +40,14 @@ pub struct Model {
     pub seawatch_pii_mode: String,
     pub seawatch_pseudo_key: Option<String>,
     pub require_mfa: bool,
+    pub edit_username_enabled: bool,
+    pub webhook_retry_max_attempts: Option<i32>,
+    pub webhook_retry_base_delay_ms: Option<i32>,
+    pub webhook_retry_max_delay_ms: Option<i32>,
+    pub webhook_retry_max_total_delay_ms: Option<i32>,
+    pub default_locale: String,
+    pub supported_locales: Vec<String>,
+    pub consent_ttl_days: Option<i32>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveColumn)]
@@ -71,6 +79,14 @@ pub enum Column {
     SeawatchPiiMode,
     SeawatchPseudoKey,
     RequireMfa,
+    EditUsernameEnabled,
+    WebhookRetryMaxAttempts,
+    WebhookRetryBaseDelayMs,
+    WebhookRetryMaxDelayMs,
+    WebhookRetryMaxTotalDelayMs,
+    DefaultLocale,
+    SupportedLocales,
+    ConsentTtlDays,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DerivePrimaryKey)]
@@ -125,6 +141,14 @@ impl ColumnTrait for Column {
             Self::SeawatchPiiMode => ColumnType::String(StringLen::N(20u32)).def(),
             Self::SeawatchPseudoKey => ColumnType::String(StringLen::N(255u32)).def().null(),
             Self::RequireMfa => ColumnType::Boolean.def(),
+            Self::EditUsernameEnabled => ColumnType::Boolean.def(),
+            Self::WebhookRetryMaxAttempts => ColumnType::Integer.def().null(),
+            Self::WebhookRetryBaseDelayMs => ColumnType::Integer.def().null(),
+            Self::WebhookRetryMaxDelayMs => ColumnType::Integer.def().null(),
+            Self::WebhookRetryMaxTotalDelayMs => ColumnType::Integer.def().null(),
+            Self::DefaultLocale => ColumnType::Text.def(),
+            Self::SupportedLocales => ColumnType::Array(RcOrArc::new(ColumnType::Text)).def(),
+            Self::ConsentTtlDays => ColumnType::Integer.def().null(),
         }
     }
 }

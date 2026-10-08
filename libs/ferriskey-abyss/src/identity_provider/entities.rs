@@ -8,6 +8,9 @@ use utoipa::ToSchema;
 use uuid::{NoContext, Timestamp, Uuid};
 
 use ferriskey_domain::realm::RealmId;
+use ferriskey_domain::realm::scope::RealmOwned;
+
+use crate::identity_provider::value_objects::IdentityProviderConfigPatch;
 
 /// Unique identifier for an Identity Provider
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord, ToSchema)]
@@ -186,6 +189,12 @@ impl IdentityProvider {
     }
 }
 
+impl RealmOwned for IdentityProvider {
+    fn realm_id(&self) -> RealmId {
+        self.realm_id
+    }
+}
+
 /// Input for creating an identity provider
 pub struct CreateIdentityProviderInput {
     pub realm_name: String,
@@ -215,6 +224,7 @@ pub struct UpdateIdentityProviderInput {
     pub trust_email: Option<bool>,
     pub link_only: Option<bool>,
     pub config: Option<JsonValue>,
+    pub patch: IdentityProviderConfigPatch,
 }
 
 /// Input for getting an identity provider

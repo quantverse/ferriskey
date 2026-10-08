@@ -5,6 +5,7 @@ use crate::application::http::server::app_state::AppState;
 use crate::application::http::server::openapi::ApiDoc;
 use crate::args::Args;
 use ferriskey_api_abyss::routes::abyss_routes;
+use ferriskey_api_account::router::account_routes;
 use ferriskey_api_aegis::router::aegis_routes;
 use ferriskey_api_authentication::router::authentication_routes;
 use ferriskey_api_broker::router::broker_routes;
@@ -17,6 +18,7 @@ use ferriskey_api_portal_layouts::router::portal_layouts_routes;
 use ferriskey_api_portal_theme::router::portal_theme_routes;
 use ferriskey_api_realm::router::realm_routes;
 use ferriskey_api_role::router::role_routes;
+use ferriskey_api_saml::router::saml_routes;
 use ferriskey_api_seawatch::router::seawatch_router;
 use ferriskey_api_trident::router::trident_routes;
 use ferriskey_api_user::router::user_routes;
@@ -25,7 +27,9 @@ use ferriskey_api_webhook::router::webhook_routes;
 use super::config::get_config;
 use axum::Router;
 use axum::http::Method;
-use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
+use axum::http::header::{
+    ACCEPT, AUTHORIZATION, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, LOCATION,
+};
 use axum::routing::get;
 use axum_cookie::prelude::*;
 use axum_prometheus::PrometheusMetricLayer;
@@ -108,6 +112,10 @@ pub fn router(state: AppState) -> Result<Router, anyhow::Error> {
             ACCEPT,
             LOCATION,
         ])
+        // The console reads the filename an export chose out of this header.
+        // A cross-origin response hides every header the server does not name
+        // here, so without it the download falls back to a generic name.
+        .expose_headers([CONTENT_DISPOSITION])
         .allow_credentials(true)
         .max_age(PREFLIGHT_MAX_AGE);
 
@@ -140,6 +148,7 @@ pub fn router(state: AppState) -> Result<Router, anyhow::Error> {
         .route(&format!("{}/config", root_path), get(get_config))
         .merge(realm_routes(state.clone()))
         .merge(client_routes(state.clone()))
+        .merge(account_routes(state.clone()))
         .merge(user_routes(state.clone()))
         .merge(authentication_routes(state.clone(), &root_path))
         .merge(role_routes(state.clone()))
@@ -154,6 +163,7 @@ pub fn router(state: AppState) -> Result<Router, anyhow::Error> {
         .merge(abyss_routes(state.clone()))
         .merge(aegis_routes(state.clone()))
         .merge(broker_routes(state.clone(), &root_path))
+        .merge(saml_routes(state.clone(), &root_path))
         .merge(organization_routes(state.clone()))
         .merge(health_routes(&root_path))
         .route(

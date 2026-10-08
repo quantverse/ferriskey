@@ -84,6 +84,7 @@ mod tests {
                 schema: schema.clone(),
             },
             webapp_url: "http://localhost:5555".to_string(),
+            webhook_allow_private_endpoints: false,
         })
         .await
         .expect("create service");

@@ -4,15 +4,25 @@ import { useAuth } from '@/hooks/use-auth'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useEffect, useMemo, useState } from 'react'
 import { useForm } from 'react-hook-form'
+import { useTranslation } from 'react-i18next'
 import { useLocation, useNavigate, useParams } from 'react-router'
 import { buildResetPasswordSchema, type ResetPasswordSchema } from '../schemas/reset-password.schema'
 import PageResetPassword from '../ui/page-reset-password'
 import { usePublicPasswordPolicy, DEFAULT_PASSWORD_POLICY } from '@/api/password-policy.api'
+import { apiErrorMessage, partitionFieldErrors, validationErrorsFrom } from '@/lib/api-error'
+import { AUTH_NAMESPACE } from '../constants'
 
 type TokenStatus = 'loading' | 'valid' | 'invalid'
 
+const FIELD_BY_API_FIELD: Record<string, keyof ResetPasswordSchema> = {
+  password: 'password',
+  new_password: 'password',
+  value: 'password',
+}
+
 export default function PageResetPasswordFeature() {
   const { realm_name } = useParams()
+  const { t } = useTranslation(AUTH_NAMESPACE)
   const navigate = useNavigate()
   const location = useLocation()
   const searchParams = useMemo(() => new URLSearchParams(location.search), [location.search])
@@ -22,8 +32,9 @@ export default function PageResetPasswordFeature() {
   const missingParams = !tokenId || !token
 
   const [tokenStatus, setTokenStatus] = useState<TokenStatus>(missingParams ? 'invalid' : 'loading')
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const { mutate: verifyToken } = useVerifyResetToken()
-  const { mutate: resetPassword, isPending, error } = useResetPassword()
+  const { mutate: resetPassword, isPending } = useResetPassword()
   const { setAuthTokens } = useAuth()
 
   const { data: policy, isLoading: isPolicyLoading } = usePublicPasswordPolicy(realm_name)
@@ -67,6 +78,8 @@ export default function PageResetPasswordFeature() {
   function onSubmit(data: ResetPasswordSchema) {
     if (missingParams) return
 
+    setErrorMessage(null)
+
     resetPassword(
       {
         path: { realm_name: realm_name ?? 'master' },
@@ -87,6 +100,22 @@ export default function PageResetPasswordFeature() {
 
           navigate(`/realms/${realm_name}/overview`)
         },
+        onError: (error) => {
+          const { byField, unattached } = partitionFieldErrors(
+            validationErrorsFrom(error),
+            (field) => FIELD_BY_API_FIELD[field]
+          )
+
+          for (const [field, message] of byField) {
+            form.setError(field, { type: 'server', message })
+          }
+
+          if (byField.size > 0 && unattached.length === 0) return
+
+          setErrorMessage(
+            unattached.join(' — ') || apiErrorMessage(error, t('reset_password.failed'))
+          )
+        },
       }
     )
   }
@@ -98,7 +127,7 @@ export default function PageResetPasswordFeature() {
         onSubmit={onSubmit}
         isPending={isPending}
         tokenStatus={tokenStatus}
-        errorMessage={error?.message ?? null}
+        errorMessage={errorMessage}
         policy={resolvedPolicy}
       />
     </Form>

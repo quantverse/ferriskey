@@ -61,6 +61,9 @@ impl From<compass_flow_steps::Model> for CompassFlowStep {
             "idp_redirect" => FlowStepName::IdpRedirect,
             "idp_callback" => FlowStepName::IdpCallback,
             "finalize" => FlowStepName::Finalize,
+            "saml_authn_request" => FlowStepName::SamlAuthnRequest,
+            "saml_assertion" => FlowStepName::SamlAssertion,
+            "subject_token_exchange" => FlowStepName::SubjectTokenExchange,
             _ => FlowStepName::Authorize,
         };
 
@@ -78,6 +81,7 @@ impl From<compass_flow_steps::Model> for CompassFlowStep {
             duration_ms: model.duration_ms,
             error_code: model.error_code,
             error_message: model.error_message,
+            details: model.details,
             started_at: Utc.from_utc_datetime(&model.started_at),
         }
     }
@@ -93,8 +97,93 @@ impl From<CompassFlowStep> for compass_flow_steps::ActiveModel {
             duration_ms: Set(step.duration_ms),
             error_code: Set(step.error_code),
             error_message: Set(step.error_message),
+            details: Set(step.details),
             started_at: Set(step.started_at.naive_utc()),
             created_at: Set(Utc::now().naive_utc()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use uuid::Uuid;
+
+    fn wire_name(step_name: &FlowStepName) -> &'static str {
+        match step_name {
+            FlowStepName::Authorize => "authorize",
+            FlowStepName::CredentialValidation => "credential_validation",
+            FlowStepName::MfaChallenge => "mfa_challenge",
+            FlowStepName::TokenExchange => "token_exchange",
+            FlowStepName::IdpRedirect => "idp_redirect",
+            FlowStepName::IdpCallback => "idp_callback",
+            FlowStepName::Finalize => "finalize",
+            FlowStepName::SamlAuthnRequest => "saml_authn_request",
+            FlowStepName::SamlAssertion => "saml_assertion",
+            FlowStepName::SubjectTokenExchange => "subject_token_exchange",
+        }
+    }
+
+    fn stored_step(step_name: &str) -> compass_flow_steps::Model {
+        compass_flow_steps::Model {
+            id: Uuid::new_v4(),
+            flow_id: Uuid::new_v4(),
+            step_name: step_name.to_string(),
+            status: "success".to_string(),
+            duration_ms: None,
+            error_code: None,
+            error_message: None,
+            started_at: Utc::now().naive_utc(),
+            created_at: Utc::now().naive_utc(),
+            details: None,
+        }
+    }
+
+    #[test]
+    fn a_step_reads_back_as_the_step_that_was_written() {
+        let step_names = [
+            FlowStepName::Authorize,
+            FlowStepName::CredentialValidation,
+            FlowStepName::MfaChallenge,
+            FlowStepName::TokenExchange,
+            FlowStepName::IdpRedirect,
+            FlowStepName::IdpCallback,
+            FlowStepName::Finalize,
+            FlowStepName::SamlAuthnRequest,
+            FlowStepName::SamlAssertion,
+            FlowStepName::SubjectTokenExchange,
+        ];
+
+        for step_name in step_names {
+            let written = step_name.to_string();
+            assert_eq!(written, wire_name(&step_name));
+
+            let read = CompassFlowStep::from(stored_step(&written));
+            assert_eq!(
+                read.step_name, step_name,
+                "`{written}` must not read back as another step"
+            );
+        }
+    }
+
+    #[test]
+    fn a_step_without_details_maps_to_none() {
+        let read = CompassFlowStep::from(stored_step("authorize"));
+
+        assert_eq!(read.details, None);
+    }
+
+    #[test]
+    fn a_step_round_trips_its_details_through_the_active_model() {
+        let details = serde_json::json!({ "idp": "okta", "redirect_count": 2 });
+        let mut model = stored_step("idp_callback");
+        model.details = Some(details.clone());
+
+        let read = CompassFlowStep::from(model);
+        assert_eq!(read.details, Some(details.clone()));
+
+        let active_model = compass_flow_steps::ActiveModel::from(read);
+        assert_eq!(active_model.details.unwrap(), Some(details));
     }
 }

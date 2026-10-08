@@ -11,6 +11,7 @@ use ferriskey_compass::{
     value_objects::{DailyActivityStats, DailyActivityStatsFilter, FlowFilter, FlowStats},
 };
 use ferriskey_domain::realm::RealmId;
+use ferriskey_domain::realm::scope::Unscoped;
 
 use crate::domain::common::entities::app_errors::CoreError;
 use crate::entity::{compass_flow_steps, compass_flows};
@@ -150,7 +151,10 @@ impl CompassFlowRepository for PostgresCompassFlowRepository {
         Ok(flows)
     }
 
-    async fn get_flow_by_id(&self, flow_id: Uuid) -> Result<Option<CompassFlow>, CoreError> {
+    async fn get_flow_by_id(
+        &self,
+        flow_id: Uuid,
+    ) -> Result<Option<Unscoped<CompassFlow>>, CoreError> {
         let result = compass_flows::Entity::find_by_id(flow_id)
             .find_with_related(compass_flow_steps::Entity)
             .all(&self.db)
@@ -163,7 +167,7 @@ impl CompassFlowRepository for PostgresCompassFlowRepository {
         let flow = result.into_iter().next().map(|(flow_model, step_models)| {
             let mut flow: CompassFlow = flow_model.into();
             flow.steps = step_models.into_iter().map(|s| s.into()).collect();
-            flow
+            Unscoped::new(flow)
         });
 
         Ok(flow)
@@ -187,6 +191,24 @@ impl CompassFlowRepository for PostgresCompassFlowRepository {
             .await
             .map_err(|e| {
                 tracing::error!("Failed to purge old compass flows: {}", e);
+                CoreError::InternalServerError
+            })?;
+
+        Ok(result.rows_affected)
+    }
+
+    async fn expire_stale_flows(&self, started_before: DateTime<Utc>) -> Result<u64, CoreError> {
+        let result = compass_flows::Entity::update_many()
+            .col_expr(
+                compass_flows::Column::Status,
+                sea_orm::sea_query::Expr::value(FlowStatus::Expired.to_string()),
+            )
+            .filter(compass_flows::Column::Status.eq(FlowStatus::Pending.to_string()))
+            .filter(compass_flows::Column::StartedAt.lt(started_before.naive_utc()))
+            .exec(&self.db)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to expire stale compass flows: {}", e);
                 CoreError::InternalServerError
             })?;
 

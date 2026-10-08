@@ -1,4 +1,8 @@
-use axum::{Extension, extract::State};
+use axum::{
+    Extension,
+    extract::{Path, State},
+    response::IntoResponse,
+};
 use axum_cookie::CookieManager;
 use ferriskey_core::domain::{
     authentication::value_objects::Identity,
@@ -17,6 +21,8 @@ use ferriskey_api_core::{
         response::Response,
     },
     app_state::AppState,
+    sso_cookie,
+    url::FullUrl,
 };
 use validator::Validate;
 
@@ -70,10 +76,12 @@ pub struct AuthenticationAttemptResponse {
 )]
 pub async fn webauthn_public_key_authenticate(
     State(state): State<AppState>,
+    Path(realm_name): Path<String>,
     Extension(identity): Extension<Identity>,
+    FullUrl(_, base_url): FullUrl,
     cookie: CookieManager,
     ValidateJson(payload): ValidateJson<AuthenticationAttemptRequest>,
-) -> Result<Response<AuthenticationAttemptResponse>, ApiError> {
+) -> Result<impl IntoResponse, ApiError> {
     let session_code = cookie
         .get("FERRISKEY_SESSION")
         .ok_or_else(|| ApiError::Unauthorized("Missing session cookie".into()))? // Ou un type d'erreur 401/403
@@ -87,6 +95,7 @@ pub async fn webauthn_public_key_authenticate(
         .webauthn_public_key_authenticate(
             identity,
             WebAuthnPublicKeyAuthenticateInput {
+                realm_name,
                 session_code,
                 rp_info,
                 credential: payload.0,
@@ -95,7 +104,10 @@ pub async fn webauthn_public_key_authenticate(
         .await
         .map_err(ApiError::from)?;
 
-    Ok(Response::OK(AuthenticationAttemptResponse {
-        login_url: output.login_url,
-    }))
+    Ok((
+        sso_cookie::headers(Some(output.sso_session), base_url.starts_with("https"))?,
+        Response::OK(AuthenticationAttemptResponse {
+            login_url: output.login_url,
+        }),
+    ))
 }

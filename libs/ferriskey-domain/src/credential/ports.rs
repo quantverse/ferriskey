@@ -7,6 +7,8 @@ use crate::credential::entities::{
     Credential, CredentialError, CredentialOverview, DeleteCredentialInput, GetCredentialsInput,
 };
 use crate::crypto::HashResult;
+use crate::realm::scope::Scoped;
+use crate::user::entities::User;
 
 pub trait CredentialService: Send + Sync {
     fn get_credentials(
@@ -37,6 +39,18 @@ pub trait CredentialRepository: Send + Sync {
         user_id: Uuid,
     ) -> impl Future<Output = Result<Credential, CredentialError>> + Send;
 
+    /// `temporary` is written, not preserved: a rehash must carry the current value
+    /// through, while a self-service change must clear it. Leaving the column alone
+    /// would keep an admin-set temporary password temporary after the user replaced
+    /// it, and the login flow would ask them to change it again, forever.
+    fn update_password_credential(
+        &self,
+        user_id: Uuid,
+        expected_secret_data: &str,
+        hash_result: HashResult,
+        temporary: bool,
+    ) -> impl Future<Output = Result<(), CredentialError>> + Send;
+
     fn has_password_credential(
         &self,
         user_id: Uuid,
@@ -53,6 +67,7 @@ pub trait CredentialRepository: Send + Sync {
     ) -> impl Future<Output = Result<Vec<Credential>, CredentialError>> + Send;
     fn delete_by_id(
         &self,
+        user: &Scoped<User>,
         credential_id: Uuid,
     ) -> impl Future<Output = Result<(), CredentialError>> + Send;
     fn create_custom_credential(
@@ -84,12 +99,13 @@ pub trait CredentialRepository: Send + Sync {
     fn get_webauthn_credential_by_credential_id_and_user(
         &self,
         credential_id: &[u8],
-        user_id: Uuid,
+        user: &Scoped<User>,
     ) -> impl Future<Output = Result<Option<Credential>, CredentialError>> + Send;
 
     /// Sometimes webauthn credential needs an internal counter updated after auth attempt
     fn update_webauthn_credential(
         &self,
+        user: &Scoped<User>,
         auth_result: &AuthenticationResult,
     ) -> impl Future<Output = Result<bool, CredentialError>> + Send;
 }

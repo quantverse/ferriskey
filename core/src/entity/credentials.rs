@@ -24,6 +24,7 @@ pub struct Model {
     pub updated_at: DateTime,
     pub temporary: Option<bool>,
     pub webauthn_credential_id: Option<Vec<u8>>,
+    pub last_used_at: Option<DateTime>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveColumn)]
@@ -39,6 +40,7 @@ pub enum Column {
     UpdatedAt,
     Temporary,
     WebauthnCredentialId,
+    LastUsedAt,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DerivePrimaryKey)]
@@ -73,6 +75,7 @@ impl ColumnTrait for Column {
             Self::UpdatedAt => ColumnType::DateTime.def(),
             Self::Temporary => ColumnType::Boolean.def().null(),
             Self::WebauthnCredentialId => ColumnType::VarBinary(StringLen::None).def().null(),
+            Self::LastUsedAt => ColumnType::DateTime.def().null(),
         }
     }
 }

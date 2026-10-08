@@ -19,6 +19,7 @@ use crate::domain::authentication::value_objects::Identity;
 use crate::domain::common::entities::app_errors::CoreError;
 use crate::domain::common::policies::ensure_policy;
 use crate::domain::credential::ports::CredentialRepository;
+use crate::domain::realm::entities::{RealmScope, Scoped};
 use crate::domain::realm::ports::RealmRepository;
 use crate::domain::user::ports::UserRepository;
 use crate::domain::user::value_objects::{CreateUserRequest, UpdateUserRequest};
@@ -82,21 +83,16 @@ where
         realm_name: String,
         mut request: CreateProviderRequest,
     ) -> Result<FederationProvider, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
-        let realm_id = realm.id;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &realm_name).await?;
 
         ensure_policy(
             self.policy
-                .can_create_federation_provider(&identity, &realm)
+                .can_create_federation_provider(&identity, scope.realm())
                 .await,
             "insufficient permissions to create provider",
         )?;
 
-        request.realm_id = realm_id.into();
+        request.realm_id = scope.id().into();
 
         // TODO: Validate config based on provider type
         self.federation_repository.create(request).await
@@ -109,30 +105,23 @@ where
         id: Uuid,
         realm_name: String,
     ) -> Result<FederationProvider, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &realm_name).await?;
 
         let provider = self
             .federation_repository
             .get_by_id(id)
             .await?
-            .ok_or(CoreError::NotFound)?;
-
-        if provider.realm_id != Into::<Uuid>::into(realm.id) {
-            return Err(CoreError::NotFound);
-        }
+            .ok_or(CoreError::NotFound)?
+            .in_realm(&scope)?;
 
         ensure_policy(
             self.policy
-                .can_view_federation_provider(&identity, &realm)
+                .can_view_federation_provider(&identity, scope.realm())
                 .await,
             "insufficient permissions to view provider",
         )?;
 
-        Ok(provider)
+        Ok(provider.into_inner())
     }
 
     #[instrument(skip(self, identity, request))]
@@ -143,30 +132,23 @@ where
         id: Uuid,
         request: UpdateProviderRequest,
     ) -> Result<FederationProvider, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &realm_name).await?;
 
         let provider = self
             .federation_repository
             .get_by_id(id)
             .await?
-            .ok_or(CoreError::NotFound)?;
-
-        if provider.realm_id != Into::<Uuid>::into(realm.id) {
-            return Err(CoreError::NotFound);
-        }
+            .ok_or(CoreError::NotFound)?
+            .in_realm(&scope)?;
 
         ensure_policy(
             self.policy
-                .can_update_federation_provider(&identity, &realm)
+                .can_update_federation_provider(&identity, scope.realm())
                 .await,
             "insufficient permissions to update provider",
         )?;
 
-        self.federation_repository.update(id, request).await
+        self.federation_repository.update(&provider, request).await
     }
 
     #[instrument(skip(self, identity))]
@@ -176,33 +158,25 @@ where
         id: Uuid,
         realm_name: String,
     ) -> Result<(), CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &realm_name).await?;
 
         let provider = self
             .federation_repository
             .get_by_id(id)
             .await?
-            .ok_or(CoreError::NotFound)?;
-
-        if provider.realm_id != Into::<Uuid>::into(realm.id) {
-            error!("Provider realm ID does not match requested realm");
-            return Err(CoreError::NotFound);
-        }
+            .ok_or(CoreError::NotFound)?
+            .in_realm(&scope)?;
 
         info!("try deleting federation provider with ID: {}", id);
 
         ensure_policy(
             self.policy
-                .can_delete_federation_provider(&identity, &realm)
+                .can_delete_federation_provider(&identity, scope.realm())
                 .await,
             "insufficient permissions to delete provider",
         )?;
 
-        self.federation_repository.delete(id).await
+        self.federation_repository.delete(&provider).await
     }
 
     #[instrument(skip(self, identity))]
@@ -211,21 +185,17 @@ where
         identity: Identity,
         realm_name: String,
     ) -> Result<Vec<FederationProvider>, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &realm_name).await?;
 
         ensure_policy(
             self.policy
-                .can_view_federation_provider(&identity, &realm)
+                .can_view_federation_provider(&identity, scope.realm())
                 .await,
             "insufficient permissions to list providers",
         )?;
 
         self.federation_repository
-            .list_by_realm(realm.id.into())
+            .list_by_realm(scope.id().into())
             .await
     }
 
@@ -236,13 +206,13 @@ where
         realm_name: String,
         id: Uuid,
     ) -> Result<TestConnectionResult, CoreError> {
-        let provider = self
+        let (_, provider) = self
             .resolve_provider_for_management(&identity, &realm_name, id)
             .await?;
 
-        match provider.provider_type {
+        match provider.get().provider_type {
             FederationType::Ldap | FederationType::ActiveDirectory => {
-                self.ldap_client.test_connection(&provider).await
+                self.ldap_client.test_connection(provider.get()).await
             }
             _ => Ok(TestConnectionResult {
                 success: false,
@@ -260,18 +230,20 @@ where
         id: Uuid,
         mode: SyncMode,
     ) -> Result<SyncResult, CoreError> {
-        let provider = self
+        let (scope, provider) = self
             .resolve_provider_for_management(&identity, &realm_name, id)
             .await?;
 
         info!(
             "Starting federation sync for provider '{}' (ID: {}), mode: {:?}",
-            provider.name, id, mode
+            provider.get().name,
+            id,
+            mode
         );
 
-        match provider.provider_type {
+        match provider.get().provider_type {
             FederationType::Ldap | FederationType::ActiveDirectory => {
-                self.sync_ldap_users(&provider, mode).await
+                self.sync_ldap_users(&scope, &provider, mode).await
             }
             _ => Err(CoreError::Configuration(
                 "Provider type does not support sync".to_string(),
@@ -293,16 +265,12 @@ where
         identity: &Identity,
         realm_name: &str,
         id: Uuid,
-    ) -> Result<FederationProvider, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+    ) -> Result<(RealmScope, Scoped<FederationProvider>), CoreError> {
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), realm_name).await?;
 
         ensure_policy(
             self.policy
-                .can_update_federation_provider(identity, &realm)
+                .can_update_federation_provider(identity, scope.realm())
                 .await,
             "insufficient permissions to operate this provider",
         )?;
@@ -311,14 +279,10 @@ where
             .federation_repository
             .get_by_id(id)
             .await?
-            .ok_or(CoreError::NotFound)?;
+            .ok_or(CoreError::NotFound)?
+            .in_realm(&scope)?;
 
-        if provider.realm_id != Into::<Uuid>::into(realm.id) {
-            error!("Provider realm ID does not match requested realm");
-            return Err(CoreError::NotFound);
-        }
-
-        Ok(provider)
+        Ok((scope, provider))
     }
 
     /// Comprehensive LDAP user synchronization with reconciliation
@@ -335,7 +299,8 @@ where
     #[instrument(skip(self, provider))]
     async fn sync_ldap_users(
         &self,
-        provider: &FederationProvider,
+        scope: &RealmScope,
+        provider: &Scoped<FederationProvider>,
         mode: SyncMode,
     ) -> Result<SyncResult, CoreError> {
         // Start timing
@@ -344,7 +309,9 @@ where
 
         info!(
             "Starting sync for provider '{}' (ID: {}), mode: {:?}",
-            provider.name, provider.id, mode
+            provider.get().name,
+            provider.get().id,
+            mode
         );
 
         let mut result = SyncResult {
@@ -360,8 +327,11 @@ where
         };
 
         // Step 1: Fetch all users from LDAP
-        info!("Fetching users from LDAP provider '{}'", provider.name);
-        let ldap_users = match self.ldap_client.search_users(provider, None).await {
+        info!(
+            "Fetching users from LDAP provider '{}'",
+            provider.get().name
+        );
+        let ldap_users = match self.ldap_client.search_users(provider.get(), None).await {
             Ok(users) => {
                 info!("Found {} users in LDAP", users.len());
                 users
@@ -384,11 +354,11 @@ where
         // Step 3: Fetch all existing federation mappings for this provider (optimized batch fetch)
         info!(
             "Fetching existing federation mappings for provider '{}'",
-            provider.name
+            provider.get().name
         );
         let existing_mappings = self
             .federation_repository
-            .list_mappings_by_provider(provider.id)
+            .list_mappings_by_provider(provider)
             .await?;
 
         info!(
@@ -417,7 +387,7 @@ where
             let existing_mapping = mappings_by_external_id.remove(&ldap_user.external_id);
 
             match self
-                .reconcile_user_optimized(provider, &ldap_user, existing_mapping, mode)
+                .reconcile_user_optimized(provider, scope, &ldap_user, existing_mapping, mode)
                 .await
             {
                 Ok(action) => match action {
@@ -467,7 +437,7 @@ where
         if mode == SyncMode::Force {
             info!("Checking for users to disable (Force mode enabled)");
             match self
-                .disable_missing_users(provider, &ldap_external_ids)
+                .disable_missing_users(provider, scope, &ldap_external_ids)
                 .await
             {
                 Ok(disabled_count) => {
@@ -520,30 +490,35 @@ where
     #[instrument(skip(self, provider, ldap_user))]
     async fn reconcile_user(
         &self,
-        provider: &FederationProvider,
+        provider: &Scoped<FederationProvider>,
+        scope: &RealmScope,
         ldap_user: &crate::domain::abyss::federation::entities::FederatedUser,
         mode: SyncMode,
     ) -> Result<ReconcileAction, CoreError> {
         // Check if mapping exists
         let existing_mapping = self
             .federation_repository
-            .get_mapping(provider.id, &ldap_user.external_id)
+            .get_mapping(provider, &ldap_user.external_id)
             .await?;
 
         match existing_mapping {
             Some(mapping) => {
                 // User exists - check if update is needed
-                let user = self.user_repository.get_by_id(mapping.user_id).await?;
+                let user = self
+                    .user_repository
+                    .get_by_id(mapping.user_id)
+                    .await?
+                    .in_realm(scope)?;
 
                 let needs_update = match mode {
                     SyncMode::Force => true, // Always update in Force mode
                     SyncMode::Import | SyncMode::LinkOnly => {
                         // Check if attributes have changed
-                        user.email.as_deref().unwrap_or("")
+                        user.get().email.as_deref().unwrap_or("")
                             != ldap_user.email.as_deref().unwrap_or("")
-                            || user.firstname.as_deref().unwrap_or("")
+                            || user.get().firstname.as_deref().unwrap_or("")
                                 != ldap_user.first_name.as_deref().unwrap_or("")
-                            || user.lastname.as_deref().unwrap_or("")
+                            || user.get().lastname.as_deref().unwrap_or("")
                                 != ldap_user.last_name.as_deref().unwrap_or("")
                     }
                 };
@@ -551,22 +526,26 @@ where
                 if needs_update && mode != SyncMode::LinkOnly {
                     // Update user attributes
                     let update_request = UpdateUserRequest {
-                        email: ldap_user.email.clone().or(user.email.clone()),
-                        firstname: ldap_user.first_name.clone().or(user.firstname.clone()),
-                        lastname: ldap_user.last_name.clone().or(user.lastname.clone()),
+                        username: None,
+                        email: ldap_user.email.clone().or(user.get().email.clone()),
+                        firstname: ldap_user
+                            .first_name
+                            .clone()
+                            .or(user.get().firstname.clone()),
+                        lastname: ldap_user.last_name.clone().or(user.get().lastname.clone()),
                         enabled: true, // Re-enable if was disabled
-                        email_verified: user.email_verified,
+                        email_verified: user.get().email_verified,
                         required_actions: None,
                     };
 
                     self.user_repository
-                        .update_user(user.id, update_request)
+                        .update_user(&user, update_request)
                         .await?;
 
                     // Update mapping timestamp
                     let updated_mapping = FederationMapping {
                         id: mapping.id,
-                        provider_id: provider.id,
+                        provider_id: provider.get().id,
                         user_id: mapping.user_id,
                         external_id: ldap_user.external_id.clone(),
                         external_username: ldap_user.username.clone(),
@@ -575,7 +554,7 @@ where
                         last_synced_at: Utc::now(),
                     };
                     self.federation_repository
-                        .update_mapping(updated_mapping)
+                        .update_mapping(provider, updated_mapping)
                         .await?;
 
                     Ok(ReconcileAction::Updated)
@@ -586,7 +565,8 @@ where
             None => {
                 // New user - create both user and mapping
                 let create_request = CreateUserRequest {
-                    realm_id: provider.realm_id.into(),
+                    id: None,
+                    realm_id: provider.get().realm_id.into(),
                     username: ldap_user.username.clone(),
                     email: ldap_user.email.clone(),
                     firstname: ldap_user.first_name.clone(),
@@ -601,7 +581,7 @@ where
                 // Create federation mapping
                 let mapping = FederationMapping {
                     id: Uuid::new_v4(),
-                    provider_id: provider.id,
+                    provider_id: provider.get().id,
                     user_id: new_user.id,
                     external_id: ldap_user.external_id.clone(),
                     external_username: ldap_user.username.clone(),
@@ -624,7 +604,8 @@ where
     #[instrument(skip(self, provider, ldap_user, existing_mapping))]
     async fn reconcile_user_optimized(
         &self,
-        provider: &FederationProvider,
+        provider: &Scoped<FederationProvider>,
+        scope: &RealmScope,
         ldap_user: &crate::domain::abyss::federation::entities::FederatedUser,
         existing_mapping: Option<FederationMapping>,
         mode: SyncMode,
@@ -632,17 +613,21 @@ where
         match existing_mapping {
             Some(mapping) => {
                 // User exists - check if update is needed
-                let user = self.user_repository.get_by_id(mapping.user_id).await?;
+                let user = self
+                    .user_repository
+                    .get_by_id(mapping.user_id)
+                    .await?
+                    .in_realm(scope)?;
 
                 let needs_update = match mode {
                     SyncMode::Force => true, // Always update in Force mode
                     SyncMode::Import | SyncMode::LinkOnly => {
                         // Check if attributes have changed
-                        user.email.as_deref().unwrap_or("")
+                        user.get().email.as_deref().unwrap_or("")
                             != ldap_user.email.as_deref().unwrap_or("")
-                            || user.firstname.as_deref().unwrap_or("")
+                            || user.get().firstname.as_deref().unwrap_or("")
                                 != ldap_user.first_name.as_deref().unwrap_or("")
-                            || user.lastname.as_deref().unwrap_or("")
+                            || user.get().lastname.as_deref().unwrap_or("")
                                 != ldap_user.last_name.as_deref().unwrap_or("")
                     }
                 };
@@ -650,22 +635,26 @@ where
                 if needs_update && mode != SyncMode::LinkOnly {
                     // Update user attributes
                     let update_request = UpdateUserRequest {
-                        email: ldap_user.email.clone().or(user.email.clone()),
-                        firstname: ldap_user.first_name.clone().or(user.firstname.clone()),
-                        lastname: ldap_user.last_name.clone().or(user.lastname.clone()),
+                        username: None,
+                        email: ldap_user.email.clone().or(user.get().email.clone()),
+                        firstname: ldap_user
+                            .first_name
+                            .clone()
+                            .or(user.get().firstname.clone()),
+                        lastname: ldap_user.last_name.clone().or(user.get().lastname.clone()),
                         enabled: true, // Re-enable if was disabled
-                        email_verified: user.email_verified,
+                        email_verified: user.get().email_verified,
                         required_actions: None,
                     };
 
                     self.user_repository
-                        .update_user(user.id, update_request)
+                        .update_user(&user, update_request)
                         .await?;
 
                     // Update mapping timestamp
                     let updated_mapping = FederationMapping {
                         id: mapping.id,
-                        provider_id: provider.id,
+                        provider_id: provider.get().id,
                         user_id: mapping.user_id,
                         external_id: ldap_user.external_id.clone(),
                         external_username: ldap_user.username.clone(),
@@ -674,7 +663,7 @@ where
                         last_synced_at: Utc::now(),
                     };
                     self.federation_repository
-                        .update_mapping(updated_mapping)
+                        .update_mapping(provider, updated_mapping)
                         .await?;
 
                     Ok(ReconcileAction::Updated)
@@ -691,7 +680,7 @@ where
 
                 let existing_user = self
                     .user_repository
-                    .get_by_username(ldap_user.username.clone(), provider.realm_id.into())
+                    .get_by_username(ldap_user.username.clone(), provider.get().realm_id.into())
                     .await;
 
                 let user = match existing_user {
@@ -699,7 +688,9 @@ where
                         // User exists but has no mapping - link it (orphan user case)
                         warn!(
                             "Refusing to link local user '{}' (ID: {}) to LDAP provider '{}': the account exists locally with no federation mapping, so claiming it from the directory would hand it to whoever controls that username",
-                            user.username, user.id, provider.name
+                            user.username,
+                            user.id,
+                            provider.get().name
                         );
 
                         return Ok(ReconcileAction::Skipped);
@@ -709,7 +700,8 @@ where
                         info!("Creating new user '{}' from LDAP", ldap_user.username);
 
                         let create_request = CreateUserRequest {
-                            realm_id: provider.realm_id.into(),
+                            id: None,
+                            realm_id: provider.get().realm_id.into(),
                             username: ldap_user.username.clone(),
                             email: ldap_user.email.clone(),
                             firstname: ldap_user.first_name.clone(),
@@ -726,12 +718,14 @@ where
                 // Create federation mapping for both cases (orphan or new user)
                 info!(
                     "Creating federation mapping for user '{}' (ID: {}) to provider '{}'",
-                    user.username, user.id, provider.name
+                    user.username,
+                    user.id,
+                    provider.get().name
                 );
 
                 let mapping = FederationMapping {
                     id: Uuid::new_v4(),
-                    provider_id: provider.id,
+                    provider_id: provider.get().id,
                     user_id: user.id,
                     external_id: ldap_user.external_id.clone(),
                     external_username: ldap_user.username.clone(),
@@ -750,8 +744,8 @@ where
                 );
 
                 let credential_data = serde_json::json!({
-                    "provider_id": provider.id.to_string(),
-                    "provider_type": provider.provider_type.to_string(),
+                    "provider_id": provider.get().id.to_string(),
+                    "provider_type": provider.get().provider_type.to_string(),
                 });
 
                 // Check if user already has a federated credential to avoid duplicates
@@ -773,7 +767,7 @@ where
                             user.id,
                             "password".to_string(),
                             "federated".to_string(), // Marker that indicates LDAP authentication
-                            Some(format!("Federated - {}", provider.name)),
+                            Some(format!("Federated - {}", provider.get().name)),
                             credential_data,
                         )
                         .await;
@@ -796,18 +790,19 @@ where
     #[instrument(skip(self, provider, ldap_external_ids))]
     async fn disable_missing_users(
         &self,
-        provider: &FederationProvider,
+        provider: &Scoped<FederationProvider>,
+        scope: &RealmScope,
         ldap_external_ids: &HashSet<String>,
     ) -> Result<u32, CoreError> {
         info!(
             "Checking for users to disable (not found in LDAP) for provider '{}'",
-            provider.name
+            provider.get().name
         );
 
         // Fetch all mappings for this provider
         let all_mappings = self
             .federation_repository
-            .list_mappings_by_provider(provider.id)
+            .list_mappings_by_provider(provider)
             .await?;
 
         let mut disabled_count = 0;
@@ -822,22 +817,28 @@ where
                 );
 
                 // Fetch the user to get current values
-                match self.user_repository.get_by_id(mapping.user_id).await {
+                match self
+                    .user_repository
+                    .get_by_id(mapping.user_id)
+                    .await
+                    .and_then(|user| user.in_realm(scope))
+                {
                     Ok(user) => {
                         // Only disable if not already disabled
-                        if user.enabled {
+                        if user.get().enabled {
                             let update_request = UpdateUserRequest {
-                                email: user.email.clone(),
-                                firstname: user.firstname.clone(),
-                                lastname: user.lastname.clone(),
+                                username: None,
+                                email: user.get().email.clone(),
+                                firstname: user.get().firstname.clone(),
+                                lastname: user.get().lastname.clone(),
                                 enabled: false, // Disable the user
-                                email_verified: user.email_verified,
+                                email_verified: user.get().email_verified,
                                 required_actions: None,
                             };
 
                             match self
                                 .user_repository
-                                .update_user(mapping.user_id, update_request)
+                                .update_user(&user, update_request)
                                 .await
                             {
                                 Ok(_) => {

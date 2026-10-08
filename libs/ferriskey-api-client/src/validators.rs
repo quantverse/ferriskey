@@ -1,3 +1,4 @@
+use ferriskey_core::domain::authentication::entities::AuthProtocol;
 use ferriskey_core::domain::client::entities::ClientType;
 use ferriskey_core::domain::client::entities::saml::{NameIdFormat, SamlAttributeNameFormat};
 use serde::{Deserialize, Serialize};
@@ -28,15 +29,18 @@ pub struct CreateClientValidator {
     pub service_account_enabled: bool,
     #[serde(default)]
     pub public_client: bool,
-    #[validate(length(min = 1, message = "protocol is required"))]
     #[serde(default)]
-    pub protocol: String,
+    pub protocol: AuthProtocol,
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
     pub direct_access_grants_enabled: bool,
     #[serde(default)]
     pub oauth_device_code_grant_enabled: bool,
+    #[serde(default)]
+    pub token_exchange_enabled: bool,
+    #[serde(default)]
+    pub consent_required: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, ToSchema)]
@@ -57,6 +61,9 @@ pub struct UpdateClientValidator {
     pub oauth_device_code_grant_enabled: Option<bool>,
 
     #[serde(default)]
+    pub token_exchange_enabled: Option<bool>,
+
+    #[serde(default)]
     pub require_pkce: Option<bool>,
 
     #[serde(default)]
@@ -70,6 +77,26 @@ pub struct UpdateClientValidator {
 
     #[serde(default)]
     pub temporary_token_lifetime: Option<i64>,
+
+    /// OIDC Back-Channel Logout endpoint of the client. Absent keeps the
+    /// current value, `null` clears it.
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    #[schema(value_type = Option<String>)]
+    pub backchannel_logout_uri: Option<Option<String>>,
+
+    #[serde(default)]
+    pub backchannel_logout_session_required: Option<bool>,
+
+    #[serde(default)]
+    pub consent_required: Option<bool>,
+}
+
+fn deserialize_optional_field<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::deserialize(deserializer)?))
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, ToSchema)]
@@ -92,6 +119,19 @@ pub struct CreateWebOriginValidator {
     #[validate(length(min = 1, message = "Origin value is required"))]
     #[serde(default)]
     pub value: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, ToSchema)]
+pub struct CreateTokenExchangePolicyValidator {
+    #[validate(length(min = 1, message = "target_audience is required"))]
+    #[serde(default)]
+    pub target_audience: String,
+    #[serde(default)]
+    pub allowed_scopes: Option<Vec<String>>,
+    #[serde(default)]
+    pub allow_impersonation: bool,
+    #[serde(default)]
+    pub allow_delegation: bool,
 }
 
 fn assertions_are_signed_by_default() -> bool {
@@ -143,4 +183,80 @@ pub struct CreateSamlAttributeMapperValidator {
     #[validate(length(min = 1, message = "source is required"))]
     #[serde(default)]
     pub source: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_exchange_stays_off_when_a_create_payload_omits_it() {
+        let payload: CreateClientValidator = serde_json::from_value(serde_json::json!({
+            "name": "api",
+            "client_id": "api",
+            "client_type": "confidential",
+        }))
+        .expect("valid payload");
+
+        assert!(!payload.token_exchange_enabled);
+    }
+
+    #[test]
+    fn an_update_payload_can_turn_token_exchange_on() {
+        let payload: UpdateClientValidator =
+            serde_json::from_value(serde_json::json!({ "token_exchange_enabled": true }))
+                .expect("valid payload");
+
+        assert_eq!(payload.token_exchange_enabled, Some(true));
+    }
+
+    #[test]
+    fn an_update_payload_without_the_flag_leaves_it_untouched() {
+        let payload: UpdateClientValidator =
+            serde_json::from_value(serde_json::json!({})).expect("valid payload");
+
+        assert_eq!(payload.token_exchange_enabled, None);
+    }
+
+    #[test]
+    fn consent_required_stays_off_when_a_create_payload_omits_it() {
+        let payload: CreateClientValidator = serde_json::from_value(serde_json::json!({
+            "name": "api",
+            "client_id": "api",
+            "client_type": "confidential",
+        }))
+        .expect("valid payload");
+
+        assert!(!payload.consent_required);
+    }
+
+    #[test]
+    fn a_create_payload_can_turn_consent_required_on() {
+        let payload: CreateClientValidator = serde_json::from_value(serde_json::json!({
+            "name": "api",
+            "client_id": "api",
+            "client_type": "confidential",
+            "consent_required": true,
+        }))
+        .expect("valid payload");
+
+        assert!(payload.consent_required);
+    }
+
+    #[test]
+    fn an_update_payload_can_turn_consent_required_on() {
+        let payload: UpdateClientValidator =
+            serde_json::from_value(serde_json::json!({ "consent_required": true }))
+                .expect("valid payload");
+
+        assert_eq!(payload.consent_required, Some(true));
+    }
+
+    #[test]
+    fn an_update_payload_without_consent_required_leaves_it_untouched() {
+        let payload: UpdateClientValidator =
+            serde_json::from_value(serde_json::json!({})).expect("valid payload");
+
+        assert_eq!(payload.consent_required, None);
+    }
 }

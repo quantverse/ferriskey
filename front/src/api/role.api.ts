@@ -1,7 +1,27 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { QueryClient, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { BaseQuery } from '.'
 import type { Schemas } from './api.client'
+import { apiErrorMessage } from '@/lib/api-error'
+import { translate } from '@/lib/i18n'
+
+const invalidateRole = async (
+  queryClient: QueryClient,
+  realmName: string,
+  roleId: string
+) => {
+  const role = window.tanstackApi.get('/realms/{realm_name}/roles/{role_id}', {
+    path: { realm_name: realmName, role_id: roleId },
+  })
+  const roles = window.tanstackApi.get('/realms/{realm_name}/roles', {
+    path: { realm_name: realmName },
+  })
+
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: role.queryKey }),
+    queryClient.invalidateQueries({ queryKey: roles.queryKey }),
+  ])
+}
 
 export const useGetRoles = ({ realm = 'master' }: BaseQuery) => {
   return useQuery(
@@ -83,11 +103,11 @@ export const useCreateRole = () => {
         await queryClient.invalidateQueries({ queryKey: clientRolesQuery.queryKey })
       }
 
-      toast.success('Role created successfully')
+      toast.success(translate('common:toast.role.created'))
     },
     onError(error) {
-      toast.error('Failed to create role', {
-        description: error.message,
+      toast.error(translate('common:toast.role.create_failed'), {
+        description: apiErrorMessage(error),
       })
     },
   })
@@ -98,15 +118,15 @@ export const useUpdateRole = () => {
 
   return useMutation({
     ...window.tanstackApi.mutation('put', '/realms/{realm_name}/roles/{role_id}').mutationOptions,
-    onSuccess(res) {
-      queryClient.invalidateQueries({ queryKey: ['role', res.data.id] })
-      toast.success('Role updated successfully', {
-        description: `Role ${res.data.name} has been updated successfully.`,
+    async onSuccess(res, variables) {
+      await invalidateRole(queryClient, variables.path.realm_name, variables.path.role_id)
+      toast.success(translate('common:toast.role.updated'), {
+        description: translate('common:toast.role.updated_detail', { name: res.data.name }),
       })
     },
     onError(error) {
-      toast.error('Failed to update role', {
-        description: error.message,
+      toast.error(translate('common:toast.role.update_failed'), {
+        description: apiErrorMessage(error),
       })
     },
   })
@@ -118,15 +138,17 @@ export const useUpdateRolePermissions = () => {
   return useMutation({
     ...window.tanstackApi.mutation('patch', '/realms/{realm_name}/roles/{role_id}/permissions')
       .mutationOptions,
-    onSuccess(res) {
-      queryClient.invalidateQueries({ queryKey: ['role', res.data.id] })
-      toast.success('Role permissions updated successfully', {
-        description: `Role ${res.data.name} permissions has been updated successfully.`,
+    async onSuccess(res, variables) {
+      await invalidateRole(queryClient, variables.path.realm_name, variables.path.role_id)
+      toast.success(translate('common:toast.role.permissions_updated'), {
+        description: translate('common:toast.role.permissions_updated_detail', {
+          name: res.data.name,
+        }),
       })
     },
     onError(error) {
-      toast.error('Failed to update role', {
-        description: error.message,
+      toast.error(translate('common:toast.role.update_failed'), {
+        description: apiErrorMessage(error),
       })
     },
   })
@@ -149,13 +171,13 @@ export const useDeleteRole = () => {
       await queryClient.invalidateQueries({
         queryKey: [...queryKey],
       })
-      toast.success('Role deleted successfully', {
-        description: 'Role has been deleted from client successfully.',
+      toast.success(translate('common:toast.role.deleted'), {
+        description: translate('common:toast.role.deleted_detail'),
       })
     },
     onError(error) {
-      toast.error('Failed to delete role', {
-        description: error.message,
+      toast.error(translate('common:toast.role.delete_failed'), {
+        description: apiErrorMessage(error),
       })
     },
   })

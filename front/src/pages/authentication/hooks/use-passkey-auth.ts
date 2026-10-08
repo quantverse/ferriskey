@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import {
   usePasskeyAuthenticateMutation,
   usePasskeyRequestOptionsMutation,
 } from '@/api/passkey.api'
+import { AUTH_NAMESPACE } from '../constants'
 import {
   isConditionalMediationAvailable,
   isWebAuthnAvailable,
@@ -16,9 +18,12 @@ type Options = {
   realm_name: string | undefined
   enabled: boolean
   isAuthInitiated: boolean
+  /** Read when the passkey completes, since autofill starts before the user can tick it. */
+  getRememberMe: () => boolean
 }
 
-export function usePasskeyAuth({ realm_name, enabled, isAuthInitiated }: Options) {
+export function usePasskeyAuth({ realm_name, enabled, isAuthInitiated, getRememberMe }: Options) {
+  const { t } = useTranslation(AUTH_NAMESPACE)
   const { mutateAsync: requestPasskeyOptionsAsync, mutate: requestPasskeyOptions } =
     usePasskeyRequestOptionsMutation()
   const { mutateAsync: authenticatePasskeyAsync, mutate: authenticatePasskey } =
@@ -58,6 +63,7 @@ export function usePasskeyAuth({ realm_name, enabled, isAuthInitiated }: Options
         const result = await authenticatePasskeyAsync({
           realm: realm_name,
           data: assertion,
+          rememberMe: getRememberMe(),
         })
 
         if (result.login_url) {
@@ -82,11 +88,12 @@ export function usePasskeyAuth({ realm_name, enabled, isAuthInitiated }: Options
     requestPasskeyOptionsAsync,
     authenticatePasskeyAsync,
     conditionalUIVersion,
+    getRememberMe,
   ])
 
   const onPasskeyLogin = useCallback(() => {
     if (!isWebAuthnAvailable()) {
-      toast.error('WebAuthn is not supported in this browser')
+      toast.error(t('passkey.unsupported'))
       return
     }
 
@@ -105,7 +112,7 @@ export function usePasskeyAuth({ realm_name, enabled, isAuthInitiated }: Options
               response.publicKey as PublicKeyCredentialRequestOptionsJSON
             )
             authenticatePasskey(
-              { realm: realm_name, data: assertion },
+              { realm: realm_name, data: assertion, rememberMe: getRememberMe() },
               {
                 onSuccess: (result) => {
                   if (result.login_url) {
@@ -113,7 +120,7 @@ export function usePasskeyAuth({ realm_name, enabled, isAuthInitiated }: Options
                   }
                 },
                 onError: () => {
-                  toast.error('Passkey authentication failed')
+                  toast.error(t('passkey.failed'))
                   setIsPasskeyLoading(false)
                   setConditionalUIVersion((v) => v + 1)
                 },
@@ -124,13 +131,13 @@ export function usePasskeyAuth({ realm_name, enabled, isAuthInitiated }: Options
           }
         },
         onError: () => {
-          toast.error('Failed to start passkey authentication')
+          toast.error(t('passkey.start_failed'))
           setIsPasskeyLoading(false)
           setConditionalUIVersion((v) => v + 1)
         },
       }
     )
-  }, [realm_name, requestPasskeyOptions, authenticatePasskey])
+  }, [realm_name, requestPasskeyOptions, authenticatePasskey, getRememberMe, t])
 
   return {
     onPasskeyLogin,

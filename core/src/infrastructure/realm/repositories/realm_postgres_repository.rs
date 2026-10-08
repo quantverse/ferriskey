@@ -10,6 +10,7 @@ use crate::{
 use chrono::Utc;
 use uuid::Uuid;
 
+use crate::domain::common::locale::{Locale, SupportedLocales};
 use crate::domain::realm::entities::RealmId;
 use crate::domain::realm::{
     entities::{Realm, RealmSetting},
@@ -17,6 +18,19 @@ use crate::domain::realm::{
 };
 use ferriskey_domain::realm::LoginAliases;
 use tracing::info_span;
+
+/// Recognise a Postgres unique-constraint violation (SQLSTATE 23505).
+///
+/// The realm name is unique in the schema, so an insert that trips this is a
+/// caller asking for a name that is taken — a conflict, not a server fault.
+/// Matching on the SQLSTATE rather than the message keeps this independent of
+/// the constraint's name and of the server's locale.
+fn is_unique_violation(error: &sea_orm::DbErr) -> bool {
+    matches!(
+        error.sql_err(),
+        Some(sea_orm::SqlErr::UniqueConstraintViolation(_))
+    )
+}
 
 #[derive(Debug, Clone)]
 pub struct PostgresRealmRepository {
@@ -86,6 +100,7 @@ impl RealmRepository for PostgresRealmRepository {
         name: String,
         display_name: Option<String>,
     ) -> Result<Realm, CoreError> {
+        let realm_name = name.clone();
         let mut realm = Realm::new(name);
         realm.display_name = display_name;
 
@@ -97,7 +112,11 @@ impl RealmRepository for PostgresRealmRepository {
             updated_at: Set(realm.updated_at.naive_utc()),
         };
 
+        let name_for_error = realm_name.clone();
         let result_insert = new_realm.insert(&self.db).await.map_err(|e| {
+            if is_unique_violation(&e) {
+                return CoreError::RealmAlreadyExists(name_for_error);
+            }
             tracing::error!("Failed to insert realm: {:?}", e);
             CoreError::InternalServerError
         })?;
@@ -203,9 +222,15 @@ impl RealmRepository for PostgresRealmRepository {
         lockout_threshold: Option<i32>,
         lockout_duration_seconds: Option<i32>,
         login_aliases: Option<LoginAliases>,
+        locales: Option<SupportedLocales>,
         seawatch_pii_mode: Option<String>,
         seawatch_pseudo_key: Option<Option<String>>,
         require_mfa: Option<bool>,
+        edit_username_enabled: Option<bool>,
+        webhook_retry_max_attempts: Option<Option<i32>>,
+        webhook_retry_base_delay_ms: Option<Option<i32>>,
+        webhook_retry_max_delay_ms: Option<Option<i32>>,
+        webhook_retry_max_total_delay_ms: Option<Option<i32>>,
     ) -> Result<RealmSetting, CoreError> {
         let realm_setting = crate::entity::realm_settings::Entity::find()
             .filter(crate::entity::realm_settings::Column::RealmId.eq::<Uuid>(realm_id.into()))
@@ -303,6 +328,12 @@ impl RealmRepository for PostgresRealmRepository {
                 Set(aliases.as_slice().iter().map(|a| a.to_string()).collect());
         }
 
+        if let Some(locales) = locales {
+            realm_setting.default_locale = Set(locales.default_locale().to_string());
+            realm_setting.supported_locales =
+                Set(locales.all().iter().map(Locale::to_string).collect());
+        }
+
         if let Some(mode) = seawatch_pii_mode {
             realm_setting.seawatch_pii_mode = Set(mode);
         }
@@ -313,6 +344,26 @@ impl RealmRepository for PostgresRealmRepository {
 
         if let Some(require_mfa) = require_mfa {
             realm_setting.require_mfa = Set(require_mfa);
+        }
+
+        if let Some(edit_username_enabled) = edit_username_enabled {
+            realm_setting.edit_username_enabled = Set(edit_username_enabled);
+        }
+
+        if let Some(webhook_retry_max_attempts) = webhook_retry_max_attempts {
+            realm_setting.webhook_retry_max_attempts = Set(webhook_retry_max_attempts);
+        }
+
+        if let Some(webhook_retry_base_delay_ms) = webhook_retry_base_delay_ms {
+            realm_setting.webhook_retry_base_delay_ms = Set(webhook_retry_base_delay_ms);
+        }
+
+        if let Some(webhook_retry_max_delay_ms) = webhook_retry_max_delay_ms {
+            realm_setting.webhook_retry_max_delay_ms = Set(webhook_retry_max_delay_ms);
+        }
+
+        if let Some(webhook_retry_max_total_delay_ms) = webhook_retry_max_total_delay_ms {
+            realm_setting.webhook_retry_max_total_delay_ms = Set(webhook_retry_max_total_delay_ms);
         }
 
         let realm_setting = realm_setting

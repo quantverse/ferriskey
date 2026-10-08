@@ -2,9 +2,10 @@ use uuid::Uuid;
 
 use crate::auth::Identity;
 use crate::common::app_errors::CoreError;
+use crate::realm::scope::{Scoped, Unscoped};
 use crate::realm::{Realm, RealmId};
 use crate::role::{
-    commands::{CreateRoleInput, GetUserRolesInput, UpdateRoleInput},
+    commands::{CreateRoleInput, UpdateRoleInput},
     entities::Role,
     value_objects::{CreateRoleRequest, UpdateRolePermissionsRequest, UpdateRoleRequest},
 };
@@ -44,11 +45,6 @@ pub trait RoleService: Send + Sync {
         identity: Identity,
         input: UpdateRoleInput,
     ) -> impl Future<Output = Result<Role, CoreError>> + Send;
-    fn get_user_roles(
-        &self,
-        identity: Identity,
-        input: GetUserRolesInput,
-    ) -> impl Future<Output = Result<Vec<Role>, CoreError>> + Send;
 }
 
 pub trait RolePolicy: Send + Sync {
@@ -72,6 +68,18 @@ pub trait RolePolicy: Send + Sync {
         identity: &Identity,
         target_realm: &Realm,
     ) -> impl Future<Output = Result<bool, CoreError>> + Send;
+    /// Whether the subject may put `permissions` on a role in `target_realm`.
+    ///
+    /// Separate from `can_create_role` / `can_update_role`: those decide
+    /// whether roles may be edited at all, this one bounds *what* they may
+    /// grant. Without it, `ManageRoles` alone escalates to `ManageRealm` by
+    /// granting it to a role the subject already holds.
+    fn can_grant_permissions(
+        &self,
+        identity: &Identity,
+        target_realm: &Realm,
+        permissions: &[String],
+    ) -> impl Future<Output = Result<bool, CoreError>> + Send;
 }
 
 #[cfg_attr(any(test, feature = "mock"), mockall::automock)]
@@ -84,8 +92,14 @@ pub trait RoleRepository: Send + Sync {
         &self,
         client_id: Uuid,
     ) -> impl Future<Output = Result<Vec<Role>, CoreError>> + Send;
-    fn get_by_id(&self, id: Uuid) -> impl Future<Output = Result<Option<Role>, CoreError>> + Send;
-    fn delete_by_id(&self, id: Uuid) -> impl Future<Output = Result<(), CoreError>> + Send;
+    fn get_by_id(
+        &self,
+        id: Uuid,
+    ) -> impl Future<Output = Result<Option<Unscoped<Role>>, CoreError>> + Send;
+    fn delete_by_id(
+        &self,
+        role: &Scoped<Role>,
+    ) -> impl Future<Output = Result<(), CoreError>> + Send;
 
     fn find_by_realm_id(
         &self,
@@ -95,17 +109,17 @@ pub trait RoleRepository: Send + Sync {
         &self,
         name: String,
         realm_id: Uuid,
-    ) -> impl Future<Output = Result<Option<Role>, CoreError>> + Send;
+    ) -> impl Future<Output = Result<Option<Unscoped<Role>>, CoreError>> + Send;
 
     fn update_by_id(
         &self,
-        id: Uuid,
+        role: &Scoped<Role>,
         payload: UpdateRoleRequest,
     ) -> impl Future<Output = Result<Role, CoreError>> + Send;
 
     fn update_permissions_by_id(
         &self,
-        id: Uuid,
+        role: &Scoped<Role>,
         payload: UpdateRolePermissionsRequest,
     ) -> impl Future<Output = Result<Role, CoreError>> + Send;
 }

@@ -2,6 +2,7 @@ use uuid::Uuid;
 
 use crate::auth::Identity;
 use crate::common::app_errors::CoreError;
+use crate::common::locale::SupportedLocales;
 use crate::realm::{LoginAliases, Realm, RealmId, RealmSetting, SmtpConfig};
 
 pub trait RealmPolicy: Send + Sync {
@@ -85,9 +86,15 @@ pub trait RealmRepository: Send + Sync {
         lockout_threshold: Option<i32>,
         lockout_duration_seconds: Option<i32>,
         login_aliases: Option<LoginAliases>,
+        locales: Option<SupportedLocales>,
         seawatch_pii_mode: Option<String>,
         seawatch_pseudo_key: Option<Option<String>>,
         require_mfa: Option<bool>,
+        edit_username_enabled: Option<bool>,
+        webhook_retry_max_attempts: Option<Option<i32>>,
+        webhook_retry_base_delay_ms: Option<Option<i32>>,
+        webhook_retry_max_delay_ms: Option<Option<i32>>,
+        webhook_retry_max_total_delay_ms: Option<Option<i32>>,
     ) -> impl Future<Output = Result<RealmSetting, CoreError>> + Send;
 
     fn get_realm_settings(

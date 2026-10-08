@@ -162,6 +162,7 @@ mod tests {
             .expect("run migrations");
 
         let service = create_service(FerriskeyConfig {
+            webhook_allow_private_endpoints: false,
             webapp_url: WEBAPP_URL.to_string(),
             database: DatabaseConfig {
                 host: db_host,
@@ -215,10 +216,8 @@ mod tests {
             &admin_token,
             &tenant_a,
             &format!("tenant-a-user-admin-{}", &suffix[..8]),
-            // `can_update_user` / `can_delete_user` accept ManageUsers;
-            // `can_view_user` accepts ViewUsers (or ManageRealm) but *not*
-            // ManageUsers, so both names are needed to exercise every route.
-            &["manage_users", "view_users"],
+            // ManageUsers covers every user route, reads included.
+            &["manage_users", "view_roles", "view_clients"],
         )
         .await;
         assign_role(&server, &admin_token, &tenant_a, &alice_id, &role_id).await;
@@ -480,6 +479,55 @@ mod tests {
             .await
     }
 
+    async fn get_user_roles(
+        server: &TestServer,
+        token: &str,
+        realm: &str,
+        user_id: &str,
+    ) -> TestResponse {
+        server
+            .get(&format!("/realms/{}/users/{}/roles", realm, user_id))
+            .add_header("Authorization", auth_header(token))
+            .await
+    }
+
+    async fn first_client_id(server: &TestServer, token: &str, realm: &str) -> String {
+        let response = server
+            .get(&format!("/realms/{}/clients", realm))
+            .add_header("Authorization", auth_header(token))
+            .await;
+
+        assert_eq!(
+            response.status_code(),
+            200,
+            "listing the clients of {realm} failed: {}",
+            response.text()
+        );
+
+        let body: Value = response.json();
+        body["data"][0]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("first client id in response: {body}"))
+            .to_string()
+    }
+
+    async fn evaluate_scopes(
+        server: &TestServer,
+        token: &str,
+        realm: &str,
+        client_id: &str,
+        user_id: &str,
+    ) -> TestResponse {
+        server
+            .post(&format!(
+                "/realms/{}/clients/{}/evaluate-scopes",
+                realm, client_id
+            ))
+            .add_header("Authorization", auth_header(token))
+            .json(&json!({ "user_id": user_id }))
+            .await
+    }
+
     /// Plant a fresh victim in `tenant_b` with a known password. Returns
     /// `(user_id, username)`. Each test gets its own so a successful attack in one
     /// test cannot corrupt another.
@@ -509,8 +557,8 @@ mod tests {
                 .await;
             assert_eq!(
                 listing.status_code(),
-                403,
-                "listing another tenant's federation providers must be refused: {}",
+                404,
+                "listing another tenant's federation providers must read as absent: {}",
                 listing.text()
             );
 
@@ -523,7 +571,7 @@ mod tests {
                 .await;
             assert_eq!(
                 test_connection.status_code(),
-                403,
+                404,
                 "authorization must be decided before the provider is looked up, so a stranger learns nothing about which ids exist: {}",
                 test_connection.text()
             );
@@ -537,8 +585,8 @@ mod tests {
                 .await;
             assert_eq!(
                 sync.status_code(),
-                403,
-                "triggering a directory sync on another tenant's provider must be refused: {}",
+                404,
+                "triggering a directory sync on another tenant's provider must read as absent: {}",
                 sync.text()
             );
         });
@@ -655,6 +703,68 @@ mod tests {
         });
     }
 
+    #[test]
+    #[ignore = "requires PostgreSQL — run with: cargo test -p ferriskey-api --test user_cross_realm_test -- --ignored"]
+    fn get_user_roles_across_tenant_realms_is_refused() {
+        rt().block_on(async {
+            let server = make_server();
+            let (victim_id, _victim_username) = plant_victim(&server).await;
+
+            let victim_role = create_role(
+                &server,
+                admin_token(),
+                tenant_b(),
+                &format!("tenant-b-secret-{}", Uuid::new_v4().simple()),
+                &["manage_realm"],
+            )
+            .await;
+            assign_role(&server, admin_token(), tenant_b(), &victim_id, &victim_role).await;
+
+            let attack = get_user_roles(&server, alice_token(), tenant_a(), &victim_id).await;
+
+            let status = attack.status_code();
+            let body = attack.text();
+            assert_eq!(
+                status, 404,
+                "a tenant-a admin read the roles of tenant-b user {victim_id}; \
+                 got {status}: {body}"
+            );
+            assert!(
+                !body.contains(&victim_role),
+                "the response disclosed a tenant-b role id: {body}"
+            );
+        });
+    }
+
+    #[test]
+    #[ignore = "requires PostgreSQL — run with: cargo test -p ferriskey-api --test user_cross_realm_test -- --ignored"]
+    fn evaluate_scopes_across_tenant_realms_is_refused() {
+        rt().block_on(async {
+            let server = make_server();
+            let (victim_id, victim_username) = plant_victim(&server).await;
+            let client_id = first_client_id(&server, alice_token(), tenant_a()).await;
+
+            let attack =
+                evaluate_scopes(&server, alice_token(), tenant_a(), &client_id, &victim_id).await;
+
+            let status = attack.status_code();
+            let body = attack.text();
+            assert_eq!(
+                status, 404,
+                "a tenant-a admin previewed the tokens of tenant-b user {victim_id}; \
+                 got {status}: {body}"
+            );
+            assert!(
+                !body.contains(&victim_username),
+                "the preview disclosed the victim's username: {body}"
+            );
+            assert!(
+                !body.contains(&user_email(&victim_username)),
+                "the preview disclosed the victim's email: {body}"
+            );
+        });
+    }
+
     // -------------------------------------------------------------------------
     // Non-regression — the same admin, on her own realm, must keep working
     // -------------------------------------------------------------------------
@@ -721,6 +831,35 @@ mod tests {
                 200,
                 "the deleted user is still readable: {}",
                 gone.text()
+            );
+        });
+    }
+
+    #[test]
+    #[ignore = "requires PostgreSQL — run with: cargo test -p ferriskey-api --test user_cross_realm_test -- --ignored"]
+    fn tenant_admin_still_reads_roles_and_previews_scopes_of_its_own_realm() {
+        rt().block_on(async {
+            let server = make_server();
+
+            let username = format!("colleague-{}", Uuid::new_v4().simple());
+            let user_id = create_user(&server, alice_token(), tenant_a(), &username).await;
+
+            let roles = get_user_roles(&server, alice_token(), tenant_a(), &user_id).await;
+            assert_eq!(
+                roles.status_code(),
+                200,
+                "alice cannot read the roles of a user of her own realm: {}",
+                roles.text()
+            );
+
+            let client_id = first_client_id(&server, alice_token(), tenant_a()).await;
+            let preview =
+                evaluate_scopes(&server, alice_token(), tenant_a(), &client_id, &user_id).await;
+            assert_eq!(
+                preview.status_code(),
+                200,
+                "alice cannot preview the scopes of a user of her own realm: {}",
+                preview.text()
             );
         });
     }

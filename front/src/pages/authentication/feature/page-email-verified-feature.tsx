@@ -1,8 +1,10 @@
 import { CheckCircle } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { Link, useParams } from 'react-router'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import '../ui/page-login.css'
+import { AUTH_NAMESPACE } from '../constants'
 
 /**
  * Post-verification success screen. Reached via a redirect from
@@ -14,6 +16,7 @@ import '../ui/page-login.css'
  */
 export default function PageEmailVerifiedFeature() {
   const { realm_name } = useParams()
+  const { t } = useTranslation(AUTH_NAMESPACE)
 
   return (
     <div className='login-shell relative flex min-h-svh items-center justify-center px-6 py-10'>
@@ -28,16 +31,15 @@ export default function PageEmailVerifiedFeature() {
                   </div>
                   <div className='space-y-2'>
                     <h1 className='text-2xl font-semibold tracking-tight'>
-                      Email verified
+                      {t('email_verified.title')}
                     </h1>
                     <p className='text-sm text-muted-foreground'>
-                      Your email address has been confirmed. You can now sign in
-                      to your account.
+                      {t('email_verified.description')}
                     </p>
                   </div>
                   <Button asChild className='w-full rounded-lg py-5 text-sm'>
                     <Link to={`/realms/${realm_name}/authentication/login`}>
-                      Continue to sign in
+                      {t('email_verified.action')}
                     </Link>
                   </Button>
                 </div>

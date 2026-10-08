@@ -3,14 +3,17 @@ use std::sync::Arc;
 use crate::email_template::entities::EmailTemplate;
 use crate::email_template::ports::{
     CreateEmailTemplateInput, DeleteEmailTemplateInput, EmailTemplatePolicy,
-    EmailTemplateRepository, EmailTemplateService, GetEmailTemplateInput, GetEmailTemplatesInput,
-    RenderEmailTemplateInput, TemplateRenderer, UpdateEmailTemplateInput,
+    EmailTemplateRepository, EmailTemplateService, EmailTemplateSource, GetEmailTemplateInput,
+    GetEmailTemplatesInput, ImportEmailTemplateInput, RenderEmailTemplateInput, TemplateRenderer,
+    UpdateEmailTemplateInput,
 };
+use ferriskey_authz::FerriskeyPolicy;
 use ferriskey_domain::auth::Identity;
 use ferriskey_domain::client::ports::ClientRepository;
 use ferriskey_domain::common::app_errors::CoreError;
-use ferriskey_domain::common::policies::{FerriskeyPolicy, ensure_policy};
+use ferriskey_domain::common::policies::ensure_policy;
 use ferriskey_domain::realm::ports::RealmRepository;
+use ferriskey_domain::realm::scope::{RealmScope, Scoped, UnscopedOption};
 use ferriskey_domain::user::ports::{UserRepository, UserRoleRepository};
 
 #[derive(Clone, Debug)]
@@ -67,19 +70,17 @@ where
         identity: Identity,
         input: GetEmailTemplatesInput,
     ) -> Result<Vec<EmailTemplate>, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
 
         ensure_policy(
-            self.policy.can_view_email_template(&identity, &realm).await,
+            self.policy
+                .can_view_email_template(&identity, scope.realm())
+                .await,
             "insufficient permissions",
         )?;
 
         self.email_template_repository
-            .fetch_by_realm(realm.id.into())
+            .fetch_by_realm(scope.id().into())
             .await
     }
 
@@ -88,20 +89,20 @@ where
         identity: Identity,
         input: GetEmailTemplateInput,
     ) -> Result<EmailTemplate, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
 
         ensure_policy(
-            self.policy.can_view_email_template(&identity, &realm).await,
+            self.policy
+                .can_view_email_template(&identity, scope.realm())
+                .await,
             "insufficient permissions",
         )?;
 
         self.email_template_repository
-            .get_by_id(realm.id.into(), input.template_id)
+            .get_by_id(scope.id().into(), input.template_id)
             .await?
+            .in_realm(&scope)?
+            .map(Scoped::into_inner)
             .ok_or(CoreError::EmailTemplateNotFound)
     }
 
@@ -110,15 +111,11 @@ where
         identity: Identity,
         input: CreateEmailTemplateInput,
     ) -> Result<EmailTemplate, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
 
         ensure_policy(
             self.policy
-                .can_manage_email_template(&identity, &realm)
+                .can_manage_email_template(&identity, scope.realm())
                 .await,
             "insufficient permissions",
         )?;
@@ -132,7 +129,7 @@ where
 
         self.email_template_repository
             .create(
-                realm.id.into(),
+                scope.id().into(),
                 input.name,
                 input.email_type.to_string(),
                 input.structure,
@@ -146,22 +143,20 @@ where
         identity: Identity,
         input: UpdateEmailTemplateInput,
     ) -> Result<EmailTemplate, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
 
         ensure_policy(
             self.policy
-                .can_manage_email_template(&identity, &realm)
+                .can_manage_email_template(&identity, scope.realm())
                 .await,
             "insufficient permissions",
         )?;
 
-        self.email_template_repository
-            .get_by_id(realm.id.into(), input.template_id)
+        let template = self
+            .email_template_repository
+            .get_by_id(scope.id().into(), input.template_id)
             .await?
+            .in_realm(&scope)?
             .ok_or(CoreError::EmailTemplateNotFound)?;
 
         let mjml = self
@@ -172,13 +167,7 @@ where
         self.template_renderer.render_to_html(&mjml)?;
 
         self.email_template_repository
-            .update(
-                realm.id.into(),
-                input.template_id,
-                input.name,
-                input.structure,
-                mjml,
-            )
+            .update(&template, input.name, input.structure, mjml)
             .await
     }
 
@@ -187,27 +176,23 @@ where
         identity: Identity,
         input: DeleteEmailTemplateInput,
     ) -> Result<(), CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
 
         ensure_policy(
             self.policy
-                .can_manage_email_template(&identity, &realm)
+                .can_manage_email_template(&identity, scope.realm())
                 .await,
             "insufficient permissions",
         )?;
 
-        self.email_template_repository
-            .get_by_id(realm.id.into(), input.template_id)
+        let template = self
+            .email_template_repository
+            .get_by_id(scope.id().into(), input.template_id)
             .await?
+            .in_realm(&scope)?
             .ok_or(CoreError::EmailTemplateNotFound)?;
 
-        self.email_template_repository
-            .delete(realm.id.into(), input.template_id)
-            .await
+        self.email_template_repository.delete(&template).await
     }
 
     async fn render_template_html(
@@ -215,24 +200,60 @@ where
         identity: Identity,
         input: RenderEmailTemplateInput,
     ) -> Result<String, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
 
         ensure_policy(
-            self.policy.can_view_email_template(&identity, &realm).await,
+            self.policy
+                .can_view_email_template(&identity, scope.realm())
+                .await,
             "insufficient permissions",
         )?;
 
         let template = self
             .email_template_repository
-            .get_by_id(realm.id.into(), input.template_id)
+            .get_by_id(scope.id().into(), input.template_id)
             .await?
+            .in_realm(&scope)?
             .ok_or(CoreError::EmailTemplateNotFound)?;
 
-        self.template_renderer.render_to_html(&template.mjml)
+        self.template_renderer.render_to_html(&template.get().mjml)
+    }
+
+    async fn import_template(
+        &self,
+        identity: Identity,
+        input: ImportEmailTemplateInput,
+    ) -> Result<EmailTemplate, CoreError> {
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+
+        ensure_policy(
+            self.policy
+                .can_manage_email_template(&identity, scope.realm())
+                .await,
+            "insufficient permissions",
+        )?;
+
+        // MJML imports are parsed back into a builder structure so the imported
+        // template stays editable in the builder, like any other template.
+        let structure = match input.source {
+            EmailTemplateSource::Structure(structure) => structure,
+            EmailTemplateSource::Mjml(mjml) => self.template_renderer.parse_intermediate(&mjml)?,
+        };
+
+        let mjml = self.template_renderer.render_to_intermediate(&structure)?;
+
+        // Validate that the MJML can be converted to HTML
+        self.template_renderer.render_to_html(&mjml)?;
+
+        self.email_template_repository
+            .create(
+                scope.id().into(),
+                input.name,
+                input.email_type.to_string(),
+                structure,
+                mjml,
+            )
+            .await
     }
 }
 
@@ -243,6 +264,7 @@ mod tests {
     use crate::email_template::ports::MockEmailTemplateRepository;
     use chrono::Utc;
     use ferriskey_domain::client::ports::MockClientRepository;
+    use ferriskey_domain::realm::scope::Unscoped;
     use ferriskey_domain::realm::{Realm, ports::MockRealmRepository};
     use ferriskey_domain::role::entities::Role;
     use ferriskey_domain::user::{
@@ -264,6 +286,12 @@ mod tests {
 
         fn render_to_html(&self, _intermediate: &str) -> Result<String, CoreError> {
             Ok("<html><body>Test</body></html>".to_string())
+        }
+
+        fn parse_intermediate(&self, _intermediate: &str) -> Result<serde_json::Value, CoreError> {
+            Ok(
+                json!({"children": [{"type": "mj-section", "props": {}, "styles": {}, "children": []}]}),
+            )
         }
     }
 
@@ -296,6 +324,7 @@ mod tests {
             updated_at: Utc::now(),
             failed_login_attempts: 0,
             locked_until: None,
+            locale: None,
         }
     }
 
@@ -329,7 +358,7 @@ mod tests {
         let mut user_repo = MockUserRepository::new();
         user_repo.expect_get_by_id().returning(move |_| {
             let u = user.clone();
-            Box::pin(async move { Ok(u) })
+            Box::pin(async move { Ok(Unscoped::new(u)) })
         });
 
         let mut user_role_repo = MockUserRoleRepository::new();
@@ -402,7 +431,7 @@ mod tests {
             let t = template.clone();
             Box::pin(async move {
                 Ok(if realm_id == t.realm_id {
-                    Some(t)
+                    Some(Unscoped::new(t))
                 } else {
                     None
                 })
@@ -466,7 +495,7 @@ mod tests {
         let u = user.clone();
         user_repo.expect_get_by_id().returning(move |_| {
             let u = u.clone();
-            Box::pin(async move { Ok(u) })
+            Box::pin(async move { Ok(Unscoped::new(u)) })
         });
 
         let mut user_role_repo = MockUserRoleRepository::new();
@@ -510,7 +539,7 @@ mod tests {
             let t = victim_template.clone();
             Box::pin(async move {
                 Ok(if realm_id == t.realm_id {
-                    Some(t)
+                    Some(Unscoped::new(t))
                 } else {
                     None
                 })
@@ -555,13 +584,13 @@ mod tests {
             let t = victim_template.clone();
             Box::pin(async move {
                 Ok(if realm_id == t.realm_id {
-                    Some(t)
+                    Some(Unscoped::new(t))
                 } else {
                     None
                 })
             })
         });
-        et_repo.expect_update().returning(move |_, _, _, _, _| {
+        et_repo.expect_update().returning(move |_, _, _, _| {
             let t = updated.clone();
             Box::pin(async move { Ok(t) })
         });
@@ -605,7 +634,7 @@ mod tests {
             let t = victim_template.clone();
             Box::pin(async move {
                 Ok(if realm_id == t.realm_id {
-                    Some(t)
+                    Some(Unscoped::new(t))
                 } else {
                     None
                 })
@@ -613,7 +642,7 @@ mod tests {
         });
         et_repo
             .expect_delete()
-            .returning(|_, _| Box::pin(async { Ok(()) }));
+            .returning(|_| Box::pin(async { Ok(()) }));
 
         let service = EmailTemplateServiceImpl::new(
             Arc::new(realm_repo_for(&attacker_realm)),
@@ -652,7 +681,7 @@ mod tests {
             let t = victim_template.clone();
             Box::pin(async move {
                 Ok(if realm_id == t.realm_id {
-                    Some(t)
+                    Some(Unscoped::new(t))
                 } else {
                     None
                 })

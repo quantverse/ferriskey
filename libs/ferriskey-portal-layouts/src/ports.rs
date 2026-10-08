@@ -6,6 +6,7 @@ use crate::entities::PortalLayout;
 use ferriskey_domain::auth::Identity;
 use ferriskey_domain::common::app_errors::CoreError;
 use ferriskey_domain::realm::Realm;
+use ferriskey_domain::realm::scope::{Scoped, Unscoped};
 
 pub trait PortalLayoutsService: Send + Sync {
     fn list_layouts(
@@ -53,6 +54,12 @@ pub trait PortalLayoutsService: Send + Sync {
         &self,
         input: GetLayoutInput,
     ) -> impl Future<Output = Result<Option<PortalLayout>, CoreError>> + Send;
+
+    fn import_layout(
+        &self,
+        identity: Identity,
+        input: ImportLayoutInput,
+    ) -> impl Future<Output = Result<PortalLayout, CoreError>> + Send;
 }
 
 #[cfg_attr(any(test, feature = "mock"), mockall::automock)]
@@ -66,7 +73,7 @@ pub trait PortalLayoutsRepository: Send + Sync {
         &self,
         realm_id: Uuid,
         layout_id: Uuid,
-    ) -> impl Future<Output = Result<Option<PortalLayout>, CoreError>> + Send;
+    ) -> impl Future<Output = Result<Option<Unscoped<PortalLayout>>, CoreError>> + Send;
 
     fn get_default(
         &self,
@@ -83,28 +90,29 @@ pub trait PortalLayoutsRepository: Send + Sync {
 
     fn update(
         &self,
-        realm_id: Uuid,
-        layout_id: Uuid,
+        layout: &Scoped<PortalLayout>,
         name: String,
         tree: serde_json::Value,
     ) -> impl Future<Output = Result<PortalLayout, CoreError>> + Send;
 
     fn set_default(
         &self,
-        realm_id: Uuid,
-        layout_id: Uuid,
+        layout: &Scoped<PortalLayout>,
     ) -> impl Future<Output = Result<PortalLayout, CoreError>> + Send;
 
     fn delete(
         &self,
-        realm_id: Uuid,
-        layout_id: Uuid,
+        layout: &Scoped<PortalLayout>,
     ) -> impl Future<Output = Result<(), CoreError>> + Send;
 
     fn is_used_by_themes(
         &self,
-        realm_id: Uuid,
-        layout_id: Uuid,
+        layout: &Scoped<PortalLayout>,
+    ) -> impl Future<Output = Result<bool, CoreError>> + Send;
+
+    fn is_active_theme_layout(
+        &self,
+        layout: &Scoped<PortalLayout>,
     ) -> impl Future<Output = Result<bool, CoreError>> + Send;
 }
 
@@ -134,6 +142,12 @@ pub struct CreateLayoutInput {
 pub struct UpdateLayoutInput {
     pub realm_name: String,
     pub layout_id: Uuid,
+    pub name: String,
+    pub tree: serde_json::Value,
+}
+
+pub struct ImportLayoutInput {
+    pub realm_name: String,
     pub name: String,
     pub tree: serde_json::Value,
 }

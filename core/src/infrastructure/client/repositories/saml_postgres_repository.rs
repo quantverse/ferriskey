@@ -5,13 +5,14 @@ use sea_orm::{
 use uuid::Uuid;
 
 use crate::domain::client::{
+    entities::Client,
     entities::saml::{
         ClientSamlConfig, SamlAttributeMapper, SamlAttributeMapperDefinition, SamlConfigSettings,
     },
     ports::ClientSamlRepository,
 };
 use crate::domain::common::entities::app_errors::CoreError;
-use crate::domain::realm::entities::RealmId;
+use crate::domain::realm::entities::{RealmId, Scoped, Unscoped};
 use crate::entity::{
     client_saml_attribute_mappers::{
         ActiveModel as AttributeMapperActiveModel, Column as AttributeMapperColumn,
@@ -32,10 +33,8 @@ impl PostgresClientSamlRepository {
     pub fn new(db: DatabaseConnection) -> Self {
         Self { db }
     }
-}
 
-impl ClientSamlRepository for PostgresClientSamlRepository {
-    async fn get_config_by_client_id(
+    async fn read_config_by_client_id(
         &self,
         client_id: Uuid,
     ) -> Result<Option<ClientSamlConfig>, CoreError> {
@@ -45,6 +44,18 @@ impl ClientSamlRepository for PostgresClientSamlRepository {
             .map_err(|_| CoreError::InternalServerError)?
             .map(ClientSamlConfig::try_from)
             .transpose()
+    }
+}
+
+impl ClientSamlRepository for PostgresClientSamlRepository {
+    async fn get_config_by_client_id(
+        &self,
+        client_id: Uuid,
+    ) -> Result<Option<Unscoped<ClientSamlConfig>>, CoreError> {
+        Ok(self
+            .read_config_by_client_id(client_id)
+            .await?
+            .map(Unscoped::new))
     }
 
     async fn upsert_config(
@@ -159,6 +170,45 @@ impl ClientSamlRepository for PostgresClientSamlRepository {
         }
 
         Ok(())
+    }
+}
+
+impl crate::domain::saml::ports::SamlServiceProviderRepository for PostgresClientSamlRepository {
+    async fn get_by_entity_id(
+        &self,
+        realm_id: RealmId,
+        sp_entity_id: crate::domain::client::entities::saml::SpEntityId,
+    ) -> Result<Option<ClientSamlConfig>, CoreError> {
+        SamlConfigEntity::find()
+            .filter(SamlConfigColumn::RealmId.eq(Uuid::from(realm_id)))
+            .filter(SamlConfigColumn::SpEntityId.eq(sp_entity_id.to_string()))
+            .one(&self.db)
+            .await
+            .map_err(|_| CoreError::InternalServerError)?
+            .map(ClientSamlConfig::try_from)
+            .transpose()
+    }
+
+    async fn get_by_client_id(
+        &self,
+        client: &Scoped<Client>,
+    ) -> Result<Option<ClientSamlConfig>, CoreError> {
+        let client = client.get();
+
+        SamlConfigEntity::find_by_id(client.id)
+            .filter(SamlConfigColumn::RealmId.eq(Uuid::from(client.realm_id)))
+            .one(&self.db)
+            .await
+            .map_err(|_| CoreError::InternalServerError)?
+            .map(ClientSamlConfig::try_from)
+            .transpose()
+    }
+
+    async fn get_attribute_mappers(
+        &self,
+        client: &Scoped<Client>,
+    ) -> Result<Vec<SamlAttributeMapper>, CoreError> {
+        ClientSamlRepository::get_attribute_mappers_by_client_id(self, client.get().id).await
     }
 }
 
@@ -478,7 +528,8 @@ mod tests {
             .get_config_by_client_id(client)
             .await
             .expect("read the config")
-            .expect("the config exists");
+            .expect("the config exists")
+            .across_realms();
 
         assert_eq!(read, written);
         assert_eq!(read.name_id_format, NameIdFormat::EmailAddress);

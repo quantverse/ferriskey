@@ -4,22 +4,39 @@ import UpdatePassword from '@/pages/authentication/ui/execution/update-password.
 import { useUpdatePassword } from '@/api/trident.api'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { updatePasswordSchema, UpdatePasswordSchema } from '../../schemas/update-password.schema'
+import {
+  buildUpdatePasswordSchema,
+  UpdatePasswordSchema,
+} from '../../schemas/update-password.schema'
 import { Form } from '@/components/ui/form'
-import { useEffect } from 'react'
+import { useEffect, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { useAuthenticateMutation } from '@/api/auth.api'
 import { AuthenticationStatus } from '@/api/api.interface'
+import { usePublicPasswordPolicy } from '@/api/password-policy.api'
+import { passwordPolicyRequirements } from '@/lib/password-policy'
+import { apiErrorMessage, partitionFieldErrors, validationErrorsFrom } from '@/lib/api-error'
+import { AUTH_NAMESPACE } from '../../constants'
 
+const FIELD_BY_API_FIELD: Record<string, keyof UpdatePasswordSchema> = {
+  password: 'password',
+  value: 'password',
+}
 
 export default function UpdatePasswordFeature() {
   const { realm_name } = useParams<RouterParams>()
+  const { t } = useTranslation(AUTH_NAMESPACE)
   const { mutate: updatePassword, data: responseUpdatePassword } = useUpdatePassword()
   const { mutate: authenticate, data: authenticateResponse } = useAuthenticateMutation()
   const navigate = useNavigate()
 
+  const { data: passwordPolicy } = usePublicPasswordPolicy(realm_name)
+  const schema = useMemo(() => buildUpdatePasswordSchema(passwordPolicy), [passwordPolicy])
+  const requirements = passwordPolicyRequirements(passwordPolicy)
+
   const form = useForm<UpdatePasswordSchema>({
-    resolver: zodResolver(updatePasswordSchema),
+    resolver: zodResolver(schema),
     defaultValues: {
       password: '',
       confirmPassword: ''
@@ -36,7 +53,21 @@ export default function UpdatePasswordFeature() {
       },
       {
         onError: (error) => {
-          toast.error(error.message || 'Failed to update your password')
+          const fieldErrors = validationErrorsFrom(error)
+          const { byField, unattached } = partitionFieldErrors(
+            fieldErrors,
+            (field) => FIELD_BY_API_FIELD[field]
+          )
+
+          for (const [field, message] of byField) {
+            form.setError(field, { type: 'server', message })
+          }
+
+          if (fieldErrors.length === 0 || unattached.length > 0) {
+            toast.error(
+              unattached.join(' — ') || apiErrorMessage(error, t('update_password.failed'))
+            )
+          }
         },
       }
     )
@@ -74,7 +105,7 @@ export default function UpdatePasswordFeature() {
 
   return (
     <Form {...form}>
-      <UpdatePassword handleClick={handleClick} />
+      <UpdatePassword handleClick={handleClick} requirements={requirements} />
     </Form>
   )
 }

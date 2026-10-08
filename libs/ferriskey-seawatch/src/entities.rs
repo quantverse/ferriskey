@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use ferriskey_domain::generate_uuid_v7;
 use ferriskey_domain::realm::RealmId;
+use ferriskey_domain::realm::scope::RealmOwned;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub enum SecurityEventType {
@@ -24,6 +25,9 @@ pub enum SecurityEventType {
 
     #[serde(rename = "password_reset_completed")]
     PasswordResetCompleted,
+
+    #[serde(rename = "password_imported")]
+    PasswordImported,
 
     #[serde(rename = "user_created")]
     UserCreated,
@@ -45,6 +49,12 @@ pub enum SecurityEventType {
 
     #[serde(rename = "role_removed")]
     RoleRemoved,
+
+    #[serde(rename = "role_updated")]
+    RoleUpdated,
+
+    #[serde(rename = "role_permission_updated")]
+    RolePermissionUpdated,
 
     #[serde(rename = "client_created")]
     ClientCreated,
@@ -81,6 +91,61 @@ pub enum SecurityEventType {
 
     #[serde(rename = "identity_provider_link_removed")]
     IdentityProviderLinkRemoved,
+
+    #[serde(rename = "webhook_delivery_exhausted")]
+    WebhookDeliveryExhausted,
+
+    /// A client swapped a subject token for a new access token (RFC 8693).
+    #[serde(rename = "token_exchanged")]
+    TokenExchanged,
+
+    /// A row whose persisted `event_type` does not match any known variant —
+    /// a typo, a variant removed in a refactor, or a row written by a newer
+    /// version. Never constructed by write-path code; the read path falls
+    /// back to this instead of guessing a variant, so a corrupt or unknown
+    /// row can never be misread as a successful login. See `parse` below.
+    #[serde(rename = "unknown")]
+    Unknown,
+}
+
+impl SecurityEventType {
+    /// Parse the wire form written by `Display`. Infallible: a value that
+    /// matches no known variant becomes `Unknown` rather than being guessed
+    /// as some other variant or panicking.
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            "login_success" => Self::LoginSuccess,
+            "login_failure" => Self::LoginFailure,
+            "password_reset" => Self::PasswordReset,
+            "password_reset_requested" => Self::PasswordResetRequested,
+            "password_reset_completed" => Self::PasswordResetCompleted,
+            "password_imported" => Self::PasswordImported,
+            "user_created" => Self::UserCreated,
+            "user_email_verified" => Self::UserEmailVerified,
+            "user_deleted" => Self::UserDeleted,
+            "role_assigned" => Self::RoleAssigned,
+            "role_unassigned" => Self::RoleUnassigned,
+            "role_created" => Self::RoleCreated,
+            "role_removed" => Self::RoleRemoved,
+            "role_updated" => Self::RoleUpdated,
+            "role_permission_updated" => Self::RolePermissionUpdated,
+            "client_created" => Self::ClientCreated,
+            "client_deleted" => Self::ClientDeleted,
+            "client_secret_rotated" => Self::ClientSecretRotated,
+            "client_secret_viewed" => Self::ClientSecretViewed,
+            "realm_config_changed" => Self::RealmConfigChanged,
+            "email_not_sent" => Self::EmailNotSent,
+            "email_sent" => Self::EmailSent,
+            "client_maintenance_enabled" => Self::ClientMaintenanceEnabled,
+            "client_maintenance_disabled" => Self::ClientMaintenanceDisabled,
+            "session_created" => Self::SessionCreated,
+            "session_revoked" => Self::SessionRevoked,
+            "identity_provider_link_removed" => Self::IdentityProviderLinkRemoved,
+            "webhook_delivery_exhausted" => Self::WebhookDeliveryExhausted,
+            "token_exchanged" => Self::TokenExchanged,
+            _ => Self::Unknown,
+        }
+    }
 }
 
 impl Display for SecurityEventType {
@@ -91,6 +156,7 @@ impl Display for SecurityEventType {
             SecurityEventType::PasswordReset => write!(f, "password_reset"),
             SecurityEventType::PasswordResetRequested => write!(f, "password_reset_requested"),
             SecurityEventType::PasswordResetCompleted => write!(f, "password_reset_completed"),
+            SecurityEventType::PasswordImported => write!(f, "password_imported"),
             SecurityEventType::UserCreated => write!(f, "user_created"),
             SecurityEventType::UserEmailVerified => write!(f, "user_email_verified"),
             SecurityEventType::UserDeleted => write!(f, "user_deleted"),
@@ -98,6 +164,8 @@ impl Display for SecurityEventType {
             SecurityEventType::RoleUnassigned => write!(f, "role_unassigned"),
             SecurityEventType::RoleCreated => write!(f, "role_created"),
             SecurityEventType::RoleRemoved => write!(f, "role_removed"),
+            SecurityEventType::RoleUpdated => write!(f, "role_updated"),
+            SecurityEventType::RolePermissionUpdated => write!(f, "role_permission_updated"),
             SecurityEventType::ClientCreated => write!(f, "client_created"),
             SecurityEventType::ClientDeleted => write!(f, "client_deleted"),
             SecurityEventType::ClientSecretRotated => write!(f, "client_secret_rotated"),
@@ -116,6 +184,11 @@ impl Display for SecurityEventType {
             SecurityEventType::IdentityProviderLinkRemoved => {
                 write!(f, "identity_provider_link_removed")
             }
+            SecurityEventType::WebhookDeliveryExhausted => {
+                write!(f, "webhook_delivery_exhausted")
+            }
+            SecurityEventType::TokenExchanged => write!(f, "token_exchanged"),
+            SecurityEventType::Unknown => write!(f, "unknown"),
         }
     }
 }
@@ -221,9 +294,20 @@ impl SecurityEvent {
         actor_id: Uuid,
     ) -> Self {
         Self {
+            actor_id: Some(actor_id),
+            ..Self::without_actor(realm_id, event_type, status)
+        }
+    }
+
+    pub fn without_actor(
+        realm_id: RealmId,
+        event_type: SecurityEventType,
+        status: EventStatus,
+    ) -> Self {
+        Self {
             id: SecurityEventId::new(),
             realm_id,
-            actor_id: Some(actor_id),
+            actor_id: None,
             actor_type: None,
             event_type,
             status,
@@ -273,5 +357,11 @@ impl SecurityEvent {
     pub fn with_details(mut self, details: serde_json::Value) -> Self {
         self.details = Some(details);
         self
+    }
+}
+
+impl RealmOwned for SecurityEvent {
+    fn realm_id(&self) -> RealmId {
+        self.realm_id
     }
 }

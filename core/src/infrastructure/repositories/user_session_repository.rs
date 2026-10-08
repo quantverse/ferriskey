@@ -6,6 +6,7 @@ use sea_orm::{
 use tracing::error;
 use uuid::Uuid;
 
+use crate::domain::realm::entities::{Scoped, Unscoped};
 use crate::domain::session::{
     entities::{SessionError, UserSession},
     ports::UserSessionRepository,
@@ -27,6 +28,9 @@ impl From<crate::entity::user_sessions::Model> for UserSession {
             expires_at,
             last_seen_at,
             soft_expiry_duration: None,
+            sso_token_hash: model.sso_token_hash,
+            persistent: model.persistent,
+            authenticated_at: model.authenticated_at.with_timezone(&Utc),
         }
     }
 }
@@ -53,6 +57,9 @@ impl UserSessionRepository for PostgresUserSessionRepository {
             created_at: Set(session.created_at.naive_utc()),
             expires_at: Set(session.expires_at.naive_utc()),
             last_seen_at: Set(session.last_seen_at.map(|dt| dt.naive_utc())),
+            sso_token_hash: Set(session.sso_token_hash.clone()),
+            persistent: Set(session.persistent),
+            authenticated_at: Set(session.authenticated_at.fixed_offset()),
         };
 
         model.insert(&self.db).await.map_err(|e| {
@@ -63,7 +70,7 @@ impl UserSessionRepository for PostgresUserSessionRepository {
         Ok(())
     }
 
-    async fn find_by_user_id(&self, user_id: &Uuid) -> Result<UserSession, SessionError> {
+    async fn find_by_user_id(&self, user_id: &Uuid) -> Result<Unscoped<UserSession>, SessionError> {
         let session = crate::entity::user_sessions::Entity::find()
             .filter(crate::entity::user_sessions::Column::UserId.eq(*user_id))
             .one(&self.db)
@@ -74,7 +81,7 @@ impl UserSessionRepository for PostgresUserSessionRepository {
             })?
             .ok_or(SessionError::NotFound)?;
 
-        Ok(session.into())
+        Ok(Unscoped::new(session.into()))
     }
 
     async fn find_all_by_user_and_realm(
@@ -95,7 +102,26 @@ impl UserSessionRepository for PostgresUserSessionRepository {
         Ok(sessions.into_iter().map(|m| m.into()).collect())
     }
 
-    async fn find_by_id(&self, session_id: Uuid) -> Result<Option<UserSession>, SessionError> {
+    async fn find_by_sso_token_hash(
+        &self,
+        sso_token_hash: &str,
+    ) -> Result<Option<Unscoped<UserSession>>, SessionError> {
+        let session = crate::entity::user_sessions::Entity::find()
+            .filter(crate::entity::user_sessions::Column::SsoTokenHash.eq(sso_token_hash))
+            .one(&self.db)
+            .await
+            .map_err(|e| {
+                error!("Error finding user session by sso token: {:?}", e);
+                SessionError::NotFound
+            })?;
+
+        Ok(session.map(|m| Unscoped::new(UserSession::from(m))))
+    }
+
+    async fn find_by_id(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Option<Unscoped<UserSession>>, SessionError> {
         let session = crate::entity::user_sessions::Entity::find()
             .filter(crate::entity::user_sessions::Column::Id.eq(session_id))
             .one(&self.db)
@@ -105,12 +131,13 @@ impl UserSessionRepository for PostgresUserSessionRepository {
                 SessionError::NotFound
             })?;
 
-        Ok(session.map(|m| m.into()))
+        Ok(session.map(|m| Unscoped::new(m.into())))
     }
 
-    async fn delete(&self, id: &Uuid) -> Result<(), SessionError> {
+    async fn delete(&self, session: &Scoped<UserSession>) -> Result<(), SessionError> {
         crate::entity::user_sessions::Entity::delete_many()
-            .filter(crate::entity::user_sessions::Column::Id.eq(*id))
+            .filter(crate::entity::user_sessions::Column::Id.eq(session.get().id))
+            .filter(crate::entity::user_sessions::Column::RealmId.eq(session.get().realm_id))
             .exec(&self.db)
             .await
             .map_err(|e| {
@@ -155,18 +182,98 @@ impl UserSessionRepository for PostgresUserSessionRepository {
         Ok(result.rows_affected)
     }
 
-    async fn update_last_seen(&self, session_id: Uuid) -> Result<(), SessionError> {
+    async fn update_last_seen(&self, session: &Scoped<UserSession>) -> Result<(), SessionError> {
         crate::entity::user_sessions::Entity::update_many()
             .col_expr(
                 crate::entity::user_sessions::Column::LastSeenAt,
                 Expr::value(Utc::now().naive_utc()),
             )
-            .filter(crate::entity::user_sessions::Column::Id.eq(session_id))
+            .filter(crate::entity::user_sessions::Column::Id.eq(session.get().id))
+            .filter(crate::entity::user_sessions::Column::RealmId.eq(session.get().realm_id))
             .exec(&self.db)
             .await
             .map_err(|e| {
                 error!("Error updating last_seen_at for user session: {:?}", e);
                 SessionError::DeleteError
+            })?;
+
+        Ok(())
+    }
+
+    async fn set_sso_token_hash(
+        &self,
+        session: &Scoped<UserSession>,
+        sso_token_hash: &str,
+    ) -> Result<(), SessionError> {
+        crate::entity::user_sessions::Entity::update_many()
+            .col_expr(
+                crate::entity::user_sessions::Column::SsoTokenHash,
+                Expr::value(sso_token_hash),
+            )
+            .filter(crate::entity::user_sessions::Column::Id.eq(session.get().id))
+            .filter(crate::entity::user_sessions::Column::RealmId.eq(session.get().realm_id))
+            .exec(&self.db)
+            .await
+            .map_err(|e| {
+                error!("Error setting sso_token_hash for user session: {:?}", e);
+                SessionError::UpdateError
+            })?;
+
+        Ok(())
+    }
+
+    async fn reauthenticate(&self, session: &Scoped<UserSession>) -> Result<(), SessionError> {
+        let session = session.get();
+        let result = crate::entity::user_sessions::Entity::update_many()
+            .col_expr(
+                crate::entity::user_sessions::Column::SsoTokenHash,
+                Expr::value(session.sso_token_hash.clone()),
+            )
+            .col_expr(
+                crate::entity::user_sessions::Column::AuthenticatedAt,
+                Expr::value(session.authenticated_at.fixed_offset()),
+            )
+            .col_expr(
+                crate::entity::user_sessions::Column::ExpiresAt,
+                Expr::value(session.expires_at.naive_utc()),
+            )
+            .col_expr(
+                crate::entity::user_sessions::Column::Persistent,
+                Expr::value(session.persistent),
+            )
+            .filter(crate::entity::user_sessions::Column::Id.eq(session.id))
+            .filter(crate::entity::user_sessions::Column::RealmId.eq(session.realm_id))
+            .exec(&self.db)
+            .await
+            .map_err(|e| {
+                error!("Error re-authenticating a user session: {:?}", e);
+                SessionError::UpdateError
+            })?;
+
+        // A row revoked meanwhile must not come back to life as a success.
+        if result.rows_affected == 0 {
+            return Err(SessionError::NotFound);
+        }
+
+        Ok(())
+    }
+
+    async fn clear_sso_token_hash(
+        &self,
+        session: &Scoped<UserSession>,
+    ) -> Result<(), SessionError> {
+        crate::entity::user_sessions::Entity::update_many()
+            .col_expr(
+                crate::entity::user_sessions::Column::SsoTokenHash,
+                Expr::value(Option::<String>::None),
+            )
+            .filter(crate::entity::user_sessions::Column::Id.eq(session.get().id))
+            .filter(crate::entity::user_sessions::Column::RealmId.eq(session.get().realm_id))
+            .exec(&self.db)
+            .await
+            .map_err(|e| {
+                error!("Error clearing sso_token_hash for user session: {:?}", e);
+                SessionError::UpdateError
             })?;
 
         Ok(())

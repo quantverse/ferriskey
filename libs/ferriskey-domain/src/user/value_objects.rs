@@ -4,6 +4,7 @@ use crate::realm::RealmId;
 
 #[derive(Debug, Clone)]
 pub struct CreateUserRequest {
+    pub id: Option<Uuid>,
     pub realm_id: RealmId,
     pub client_id: Option<Uuid>,
     pub username: String,
@@ -16,6 +17,7 @@ pub struct CreateUserRequest {
 
 #[derive(Debug, Clone)]
 pub struct UpdateUserRequest {
+    pub username: Option<String>,
     pub firstname: Option<String>,
     pub lastname: Option<String>,
     pub email: Option<String>,

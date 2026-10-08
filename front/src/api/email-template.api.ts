@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { BaseQuery } from '.'
+import { apiErrorMessage } from '@/lib/api-error'
+import { translate } from '@/lib/i18n'
 
 export const useGetEmailTemplates = ({ realm = 'master' }: BaseQuery) => {
   return useQuery(
@@ -38,7 +40,7 @@ export const useCreateEmailTemplate = () => {
       }).queryKey
 
       await queryClient.invalidateQueries({ queryKey: keys })
-      toast.success('Email template created successfully')
+      toast.success(translate('common:toast.email_template.created'))
     },
   })
 }
@@ -53,7 +55,30 @@ export const useUpdateEmailTemplate = () => {
       }).queryKey
 
       await queryClient.invalidateQueries({ queryKey: keys })
-      toast.success('Email template saved successfully')
+      toast.success(translate('common:toast.email_template.saved'))
+    },
+  })
+}
+
+export const useImportEmailTemplate = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    ...window.tanstackApi.mutation('post', '/realms/{realm_name}/email-templates/import')
+      .mutationOptions,
+    onSuccess: async (_, variables) => {
+      const keys = window.tanstackApi.get('/realms/{realm_name}/email-templates', {
+        path: { realm_name: variables.path.realm_name },
+      }).queryKey
+
+      await queryClient.invalidateQueries({ queryKey: keys })
+      toast.success(translate('common:toast.email_template.imported'))
+    },
+    // The server refuses a file that belongs to the other builder or that uses
+    // a format version it cannot read; its message says which, so surface it.
+    onError: (error) => {
+      toast.error(translate('common:toast.import_failed'), {
+        description: apiErrorMessage(error),
+      })
     },
   })
 }
@@ -68,7 +93,7 @@ export const useDeleteEmailTemplate = () => {
       }).queryKey
 
       await queryClient.invalidateQueries({ queryKey: keys })
-      toast.success('Email template deleted successfully')
+      toast.success(translate('common:toast.email_template.deleted'))
     },
   })
 }

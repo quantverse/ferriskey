@@ -35,7 +35,10 @@ use crate::domain::{
         generate_random_string,
         policies::{FerriskeyPolicy, ensure_policy},
     },
-    realm::{entities::Realm, ports::RealmRepository},
+    realm::{
+        entities::{RealmScope, Scoped},
+        ports::RealmRepository,
+    },
     role::{
         entities::Role,
         ports::{RolePolicy, RoleRepository},
@@ -52,7 +55,6 @@ use crate::domain::{
     },
 };
 use ferriskey_aegis::ports::{ClientScopeMappingRepository, ClientScopeRepository};
-use uuid::Uuid;
 
 #[derive(Clone, Debug)]
 pub struct ClientServiceImpl<R, U, C, UR, W, RU, PLRU, WO, SA, RO, SE, CS, CSM>
@@ -136,17 +138,6 @@ where
             policy,
         }
     }
-
-    async fn load_client_in_realm(
-        &self,
-        client_id: Uuid,
-        realm: &Realm,
-    ) -> Result<Client, CoreError> {
-        self.client_repository
-            .get_by_id(realm.id, client_id)
-            .await
-            .map_err(|_| CoreError::NotFound)
-    }
 }
 
 impl<R, U, C, UR, W, RU, PLRU, WO, SA, RO, SE, CS, CSM> ClientService
@@ -171,12 +162,8 @@ where
         identity: Identity,
         input: CreateClientInput,
     ) -> Result<Client, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
         let realm_id = realm.id;
 
@@ -200,11 +187,12 @@ where
                 service_account_enabled: input.service_account_enabled,
                 direct_access_grants_enabled: input.direct_access_grants_enabled,
                 oauth_device_code_grant_enabled: input.oauth_device_code_grant_enabled,
+                token_exchange_enabled: input.token_exchange_enabled,
                 client_type: input.client_type,
                 require_pkce: false,
+                consent_required: input.consent_required,
             })
-            .await
-            .map_err(|_| CoreError::CreateClientError)?;
+            .await?;
 
         let realm_scopes = self
             .client_scope_repository
@@ -226,6 +214,7 @@ where
 
             self.user_repository
                 .create_user(CreateUserRequest {
+                    id: None,
                     realm_id,
                     client_id: Some(client.id),
                     username: service_account_username,
@@ -267,19 +256,19 @@ where
         identity: Identity,
         input: CreateRedirectUriInput,
     ) -> Result<RedirectUri, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
         let realm_id = realm.id;
         ensure_policy(
             self.policy.can_create_client(&identity, &realm).await,
             "insufficient permissions",
         )?;
-        self.load_client_in_realm(input.client_id, &realm).await?;
+        self.client_repository
+            .get_by_id(scope.id(), input.client_id)
+            .await
+            .map_err(|_| CoreError::NotFound)?
+            .in_realm(&scope)?;
 
         let redirect_uri = self
             .redirect_uri_repository
@@ -306,19 +295,19 @@ where
         identity: Identity,
         input: CreatePostLogoutRedirectUriInput,
     ) -> Result<RedirectUri, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
         let realm_id = realm.id;
         ensure_policy(
             self.policy.can_create_client(&identity, &realm).await,
             "insufficient permissions",
         )?;
-        self.load_client_in_realm(input.client_id, &realm).await?;
+        self.client_repository
+            .get_by_id(scope.id(), input.client_id)
+            .await
+            .map_err(|_| CoreError::NotFound)?
+            .in_realm(&scope)?;
 
         let redirect_uri = self
             .post_logout_redirect_uri_repository
@@ -345,19 +334,19 @@ where
         identity: Identity,
         input: CreateWebOriginInput,
     ) -> Result<WebOrigin, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
         let realm_id = realm.id;
         ensure_policy(
             self.policy.can_create_client(&identity, &realm).await,
             "insufficient permissions",
         )?;
-        self.load_client_in_realm(input.client_id, &realm).await?;
+        self.client_repository
+            .get_by_id(scope.id(), input.client_id)
+            .await
+            .map_err(|_| CoreError::NotFound)?
+            .in_realm(&scope)?;
 
         let value = WebOriginValue::from_str(&input.payload.value)?;
 
@@ -385,18 +374,18 @@ where
         identity: Identity,
         input: GetWebOriginsInput,
     ) -> Result<Vec<WebOrigin>, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
         ensure_policy(
             self.policy.can_view_client(&identity, &realm).await,
             "insufficient permissions",
         )?;
-        self.load_client_in_realm(input.client_id, &realm).await?;
+        self.client_repository
+            .get_by_id(scope.id(), input.client_id)
+            .await
+            .map_err(|_| CoreError::NotFound)?
+            .in_realm(&scope)?;
 
         self.web_origin_repository
             .get_by_client_id(input.client_id)
@@ -408,19 +397,19 @@ where
         identity: Identity,
         input: DeleteWebOriginInput,
     ) -> Result<(), CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
         let realm_id = realm.id;
         ensure_policy(
             self.policy.can_update_client(&identity, &realm).await,
             "insufficient permissions",
         )?;
-        self.load_client_in_realm(input.client_id, &realm).await?;
+        self.client_repository
+            .get_by_id(scope.id(), input.client_id)
+            .await
+            .map_err(|_| CoreError::NotFound)?
+            .in_realm(&scope)?;
 
         self.web_origin_repository
             .delete(input.client_id, input.web_origin_id)
@@ -445,23 +434,25 @@ where
         identity: Identity,
         input: GetClientSamlConfigInput,
     ) -> Result<ClientSamlConfig, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
         ensure_policy(
             self.policy.can_view_client(&identity, &realm).await,
             "insufficient permissions",
         )?;
-        self.load_client_in_realm(input.client_id, &realm).await?;
+        self.client_repository
+            .get_by_id(scope.id(), input.client_id)
+            .await
+            .map_err(|_| CoreError::NotFound)?
+            .in_realm(&scope)?;
 
         self.client_saml_repository
             .get_config_by_client_id(input.client_id)
             .await?
-            .ok_or(CoreError::SamlConfigNotFound)
+            .ok_or(CoreError::SamlConfigNotFound)?
+            .in_realm(&scope)
+            .map(Scoped::into_inner)
     }
 
     async fn set_client_saml_config(
@@ -469,19 +460,21 @@ where
         identity: Identity,
         input: SetClientSamlConfigInput,
     ) -> Result<ClientSamlConfig, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
         let realm_id = realm.id;
         ensure_policy(
             self.policy.can_update_client(&identity, &realm).await,
             "insufficient permissions",
         )?;
-        self.load_client_in_realm(input.client_id, &realm).await?;
+        self.client_repository
+            .get_by_id(scope.id(), input.client_id)
+            .await
+            .map_err(|_| CoreError::NotFound)?
+            .in_realm(&scope)?
+            .get()
+            .ensure_speaks_saml()?;
 
         let settings = SamlConfigSettings {
             sp_entity_id: SpEntityId::from_str(&input.payload.sp_entity_id)?,
@@ -516,19 +509,21 @@ where
         identity: Identity,
         input: CreateSamlAttributeMapperInput,
     ) -> Result<SamlAttributeMapper, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
         let realm_id = realm.id;
         ensure_policy(
             self.policy.can_update_client(&identity, &realm).await,
             "insufficient permissions",
         )?;
-        self.load_client_in_realm(input.client_id, &realm).await?;
+        self.client_repository
+            .get_by_id(scope.id(), input.client_id)
+            .await
+            .map_err(|_| CoreError::NotFound)?
+            .in_realm(&scope)?
+            .get()
+            .ensure_speaks_saml()?;
 
         let definition = SamlAttributeMapperDefinition {
             name: SamlAttributeName::from_str(&input.payload.name)?,
@@ -560,18 +555,18 @@ where
         identity: Identity,
         input: GetSamlAttributeMappersInput,
     ) -> Result<Vec<SamlAttributeMapper>, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
         ensure_policy(
             self.policy.can_view_client(&identity, &realm).await,
             "insufficient permissions",
         )?;
-        self.load_client_in_realm(input.client_id, &realm).await?;
+        self.client_repository
+            .get_by_id(scope.id(), input.client_id)
+            .await
+            .map_err(|_| CoreError::NotFound)?
+            .in_realm(&scope)?;
 
         self.client_saml_repository
             .get_attribute_mappers_by_client_id(input.client_id)
@@ -583,19 +578,19 @@ where
         identity: Identity,
         input: DeleteSamlAttributeMapperInput,
     ) -> Result<(), CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
         let realm_id = realm.id;
         ensure_policy(
             self.policy.can_update_client(&identity, &realm).await,
             "insufficient permissions",
         )?;
-        self.load_client_in_realm(input.client_id, &realm).await?;
+        self.client_repository
+            .get_by_id(scope.id(), input.client_id)
+            .await
+            .map_err(|_| CoreError::NotFound)?
+            .in_realm(&scope)?;
 
         self.client_saml_repository
             .delete_attribute_mapper(input.client_id, input.mapper_id)
@@ -620,19 +615,29 @@ where
         identity: Identity,
         input: CreateRoleInput,
     ) -> Result<Role, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
         let realm_id = realm.id;
         ensure_policy(
             self.policy.can_create_role(&identity, &realm).await,
             "insufficient permissions",
         )?;
-        self.load_client_in_realm(input.client_id, &realm).await?;
+
+        if !self
+            .policy
+            .can_grant_permissions(&identity, &realm, &input.permissions)
+            .await?
+        {
+            return Err(CoreError::Forbidden(
+                "cannot grant a permission you do not hold".to_string(),
+            ));
+        }
+        self.client_repository
+            .get_by_id(scope.id(), input.client_id)
+            .await
+            .map_err(|_| CoreError::NotFound)?
+            .in_realm(&scope)?;
 
         let role = self
             .role_repository
@@ -674,12 +679,8 @@ where
         identity: Identity,
         input: DeleteClientInput,
     ) -> Result<(), CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
         let realm_id = realm.id;
 
@@ -688,9 +689,14 @@ where
             "insufficient permissions",
         )?;
 
-        self.client_repository
-            .delete_by_id(realm_id, input.client_id)
-            .await?;
+        let client = self
+            .client_repository
+            .get_by_id(scope.id(), input.client_id)
+            .await
+            .map_err(|_| CoreError::NotFound)?
+            .in_realm(&scope)?;
+
+        self.client_repository.delete_by_id(&client).await?;
 
         self.webhook_repository
             .notify(
@@ -723,19 +729,19 @@ where
         identity: Identity,
         input: DeleteRedirectUriInput,
     ) -> Result<(), CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
         let realm_id = realm.id;
         ensure_policy(
             self.policy.can_update_client(&identity, &realm).await,
             "insufficient permissions",
         )?;
-        self.load_client_in_realm(input.client_id, &realm).await?;
+        self.client_repository
+            .get_by_id(scope.id(), input.client_id)
+            .await
+            .map_err(|_| CoreError::NotFound)?
+            .in_realm(&scope)?;
 
         self.redirect_uri_repository
             .delete(input.client_id, input.uri_id)
@@ -761,19 +767,19 @@ where
         identity: Identity,
         input: DeletePostLogoutRedirectUriInput,
     ) -> Result<(), CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
         let realm_id = realm.id;
         ensure_policy(
             self.policy.can_update_client(&identity, &realm).await,
             "insufficient permissions",
         )?;
-        self.load_client_in_realm(input.client_id, &realm).await?;
+        self.client_repository
+            .get_by_id(scope.id(), input.client_id)
+            .await
+            .map_err(|_| CoreError::NotFound)?
+            .in_realm(&scope)?;
 
         self.post_logout_redirect_uri_repository
             .delete(input.client_id, input.uri_id)
@@ -799,12 +805,8 @@ where
         identity: Identity,
         input: GetClientInput,
     ) -> Result<Client, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
         ensure_policy(
             self.policy.can_view_client(&identity, &realm).await,
@@ -812,9 +814,11 @@ where
         )?;
 
         self.client_repository
-            .get_by_id(realm.id, input.client_id)
+            .get_by_id(scope.id(), input.client_id)
             .await
-            .map_err(|_| CoreError::NotFound)
+            .map_err(|_| CoreError::NotFound)?
+            .in_realm(&scope)
+            .map(Scoped::into_inner)
     }
 
     async fn reveal_client_secret(
@@ -822,12 +826,8 @@ where
         identity: Identity,
         input: GetClientInput,
     ) -> Result<Option<String>, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
         ensure_policy(
             self.policy.can_update_client(&identity, &realm).await,
@@ -836,9 +836,10 @@ where
 
         let client = self
             .client_repository
-            .get_by_id(realm.id, input.client_id)
+            .get_by_id(scope.id(), input.client_id)
             .await
-            .map_err(|_| CoreError::NotFound)?;
+            .map_err(|_| CoreError::NotFound)?
+            .in_realm(&scope)?;
 
         self.security_event_repository
             .store_event(
@@ -848,11 +849,11 @@ where
                     EventStatus::Success,
                     identity.id(),
                 )
-                .with_target("client".to_string(), client.id, None),
+                .with_target("client".to_string(), client.get().id, None),
             )
             .await?;
 
-        Ok(client.secret_str().map(str::to_string))
+        Ok(client.get().secret_str().map(str::to_string))
     }
 
     async fn get_client_roles(
@@ -860,18 +861,18 @@ where
         identity: Identity,
         input: GetClientRolesInput,
     ) -> Result<Vec<Role>, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
         ensure_policy(
             self.policy.can_view_client(&identity, &realm).await,
             "insufficient permissions",
         )?;
-        self.load_client_in_realm(input.client_id, &realm).await?;
+        self.client_repository
+            .get_by_id(scope.id(), input.client_id)
+            .await
+            .map_err(|_| CoreError::NotFound)?
+            .in_realm(&scope)?;
 
         self.role_repository
             .get_by_client_id(input.client_id)
@@ -884,12 +885,8 @@ where
         identity: Identity,
         input: GetClientsInput,
     ) -> Result<Vec<Client>, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
         let realm_id = realm.id;
         ensure_policy(
@@ -908,18 +905,18 @@ where
         identity: Identity,
         input: GetRedirectUrisInput,
     ) -> Result<Vec<RedirectUri>, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
         ensure_policy(
             self.policy.can_view_client(&identity, &realm).await,
             "insufficient permissions",
         )?;
-        self.load_client_in_realm(input.client_id, &realm).await?;
+        self.client_repository
+            .get_by_id(scope.id(), input.client_id)
+            .await
+            .map_err(|_| CoreError::NotFound)?
+            .in_realm(&scope)?;
 
         self.redirect_uri_repository
             .get_by_client_id(input.client_id)
@@ -932,18 +929,18 @@ where
         identity: Identity,
         input: GetPostLogoutRedirectUrisInput,
     ) -> Result<Vec<RedirectUri>, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
         ensure_policy(
             self.policy.can_view_client(&identity, &realm).await,
             "insufficient permissions",
         )?;
-        self.load_client_in_realm(input.client_id, &realm).await?;
+        self.client_repository
+            .get_by_id(scope.id(), input.client_id)
+            .await
+            .map_err(|_| CoreError::NotFound)?
+            .in_realm(&scope)?;
 
         self.post_logout_redirect_uri_repository
             .get_by_client_id(input.client_id)
@@ -956,12 +953,8 @@ where
         identity: Identity,
         input: UpdateClientInput,
     ) -> Result<Client, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
         let realm_id = realm.id;
         ensure_policy(
@@ -969,9 +962,16 @@ where
             "insufficient permissions",
         )?;
 
+        let target = self
+            .client_repository
+            .get_by_id(scope.id(), input.client_id)
+            .await
+            .map_err(|_| CoreError::NotFound)?
+            .in_realm(&scope)?;
+
         let client = self
             .client_repository
-            .update_client(realm_id, input.client_id, input.payload)
+            .update_client(&target, input.payload)
             .await
             .map_err(|_| CoreError::NotFound)?;
 
@@ -994,19 +994,19 @@ where
         identity: Identity,
         input: UpdateRedirectUriInput,
     ) -> Result<RedirectUri, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
         let realm_id = realm.id;
         ensure_policy(
             self.policy.can_update_client(&identity, &realm).await,
             "insufficient permissions",
         )?;
-        self.load_client_in_realm(input.client_id, &realm).await?;
+        self.client_repository
+            .get_by_id(scope.id(), input.client_id)
+            .await
+            .map_err(|_| CoreError::NotFound)?
+            .in_realm(&scope)?;
 
         let redirect_uri = self
             .redirect_uri_repository
@@ -1033,19 +1033,19 @@ where
         identity: Identity,
         input: UpdatePostLogoutRedirectUriInput,
     ) -> Result<RedirectUri, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
         let realm_id = realm.id;
         ensure_policy(
             self.policy.can_update_client(&identity, &realm).await,
             "insufficient permissions",
         )?;
-        self.load_client_in_realm(input.client_id, &realm).await?;
+        self.client_repository
+            .get_by_id(scope.id(), input.client_id)
+            .await
+            .map_err(|_| CoreError::NotFound)?
+            .in_realm(&scope)?;
 
         let redirect_uri = self
             .post_logout_redirect_uri_repository
@@ -1095,5 +1095,266 @@ where
             .await?;
 
         Ok(resolve_allowed_origins(&sources))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::aegis::mocks::{
+        MockClientScopeMappingRepository, MockClientScopeRepository,
+    };
+    use crate::domain::{
+        client::{
+            entities::ClientConfig,
+            ports::{
+                MockClientRepository, MockClientSamlRepository,
+                MockPostLogoutRedirectUriRepository, MockRedirectUriRepository,
+                MockWebOriginRepository,
+            },
+            value_objects::UpdateClientRequest,
+        },
+        common::services::tests::{
+            create_test_realm_with_name, create_test_user_identity_with_realm,
+        },
+        realm::{
+            entities::{Realm, Unscoped},
+            ports::MockRealmRepository,
+        },
+        role::{entities::permission::Permissions, ports::MockRoleRepository},
+        seawatch::ports::MockSecurityEventRepository,
+        user::ports::{MockUserRepository, MockUserRoleRepository},
+        webhook::ports::MockWebhookRepository,
+    };
+    use ferriskey_domain::authentication::entities::AuthProtocol;
+    use ferriskey_domain::client::entities::ClientType;
+    use uuid::Uuid;
+
+    type TestClientService = ClientServiceImpl<
+        MockRealmRepository,
+        MockUserRepository,
+        MockClientRepository,
+        MockUserRoleRepository,
+        MockWebhookRepository,
+        MockRedirectUriRepository,
+        MockPostLogoutRedirectUriRepository,
+        MockWebOriginRepository,
+        MockClientSamlRepository,
+        MockRoleRepository,
+        MockSecurityEventRepository,
+        MockClientScopeRepository,
+        MockClientScopeMappingRepository,
+    >;
+
+    struct Mocks {
+        realm: MockRealmRepository,
+        client: MockClientRepository,
+        user_role: MockUserRoleRepository,
+        webhook: MockWebhookRepository,
+        security_event: MockSecurityEventRepository,
+        client_scope: MockClientScopeRepository,
+    }
+
+    impl Mocks {
+        fn for_admin_of(realm: &Realm, identity: &Identity) -> Self {
+            let mut realm_repo = MockRealmRepository::new();
+            let found = realm.clone();
+            realm_repo.expect_get_by_name().returning(move |_| {
+                let found = found.clone();
+                Box::pin(async move { Ok(Some(found)) })
+            });
+
+            let admin_role = Role {
+                id: Uuid::new_v4(),
+                name: "admin".to_string(),
+                description: None,
+                permissions: vec![Permissions::ManageClients.name()],
+                realm_id: realm.id,
+                client_id: None,
+                client: None,
+                require_mfa: false,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            let user_id = identity.id();
+            let mut user_role = MockUserRoleRepository::new();
+            user_role
+                .expect_get_user_roles()
+                .withf(move |id| *id == user_id)
+                .returning(move |_| {
+                    let roles = vec![admin_role.clone()];
+                    Box::pin(async move { Ok(roles) })
+                });
+
+            let mut webhook = MockWebhookRepository::new();
+            webhook
+                .expect_notify::<Client>()
+                .returning(|_, _| Box::pin(async { Ok(()) }));
+
+            Self {
+                realm: realm_repo,
+                client: MockClientRepository::new(),
+                user_role,
+                webhook,
+                security_event: MockSecurityEventRepository::new(),
+                client_scope: MockClientScopeRepository::new(),
+            }
+        }
+
+        fn build(self) -> TestClientService {
+            let user = Arc::new(MockUserRepository::new());
+            let client = Arc::new(self.client);
+            let user_role = Arc::new(self.user_role);
+            let policy = Arc::new(FerriskeyPolicy::new(
+                user.clone(),
+                client.clone(),
+                user_role,
+            ));
+
+            ClientServiceImpl::new(
+                Arc::new(self.realm),
+                user,
+                client,
+                Arc::new(self.webhook),
+                Arc::new(MockRedirectUriRepository::new()),
+                Arc::new(MockPostLogoutRedirectUriRepository::new()),
+                Arc::new(MockWebOriginRepository::new()),
+                Arc::new(MockClientSamlRepository::new()),
+                Arc::new(MockRoleRepository::new()),
+                Arc::new(self.security_event),
+                Arc::new(self.client_scope),
+                Arc::new(MockClientScopeMappingRepository::new()),
+                policy,
+            )
+        }
+    }
+
+    fn stored_client(realm: &Realm, token_exchange_enabled: bool) -> Client {
+        Client::new(ClientConfig {
+            realm_id: realm.id,
+            name: "api".to_string(),
+            client_id: "api".to_string(),
+            secret: None,
+            enabled: true,
+            protocol: AuthProtocol::OpenIdConnect,
+            public_client: false,
+            service_account_enabled: false,
+            client_type: ClientType::Confidential,
+            direct_access_grants_enabled: None,
+            oauth_device_code_grant_enabled: None,
+            token_exchange_enabled: Some(token_exchange_enabled),
+            access_token_lifetime: None,
+            refresh_token_lifetime: None,
+            id_token_lifetime: None,
+            temporary_token_lifetime: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn a_new_client_does_not_allow_token_exchange_unless_asked() {
+        let realm = create_test_realm_with_name("acme");
+        let identity = create_test_user_identity_with_realm(&realm);
+        let mut mocks = Mocks::for_admin_of(&realm, &identity);
+
+        let created_in = realm.clone();
+        mocks
+            .client
+            .expect_create_client()
+            .withf(|req| !req.token_exchange_enabled)
+            .times(1)
+            .returning(move |req| {
+                let client = stored_client(&created_in, req.token_exchange_enabled);
+                Box::pin(async move { Ok(client) })
+            });
+        mocks
+            .client_scope
+            .expect_find_by_realm_id()
+            .returning(|_| Box::pin(async { Ok(vec![]) }));
+        mocks
+            .security_event
+            .expect_store_event()
+            .returning(|_| Box::pin(async { Ok(()) }));
+
+        let client = mocks
+            .build()
+            .create_client(
+                identity,
+                CreateClientInput {
+                    realm_name: "acme".to_string(),
+                    name: "api".to_string(),
+                    client_id: "api".to_string(),
+                    client_type: ClientType::Confidential,
+                    service_account_enabled: false,
+                    public_client: false,
+                    protocol: AuthProtocol::OpenIdConnect,
+                    enabled: true,
+                    direct_access_grants_enabled: false,
+                    oauth_device_code_grant_enabled: false,
+                    token_exchange_enabled: false,
+                    consent_required: false,
+                },
+            )
+            .await
+            .expect("client is created");
+
+        assert!(!client.token_exchange_enabled);
+    }
+
+    #[tokio::test]
+    async fn an_admin_can_turn_token_exchange_on_for_a_client() {
+        let realm = create_test_realm_with_name("acme");
+        let identity = create_test_user_identity_with_realm(&realm);
+        let mut mocks = Mocks::for_admin_of(&realm, &identity);
+
+        let existing = stored_client(&realm, false);
+        let existing_id = existing.id;
+        mocks.client.expect_get_by_id().returning(move |_, _| {
+            let existing = existing.clone();
+            Box::pin(async move { Ok(Unscoped::new(existing)) })
+        });
+        let updated_in = realm.clone();
+        mocks
+            .client
+            .expect_update_client()
+            .withf(|_, data| data.token_exchange_enabled == Some(true))
+            .times(1)
+            .returning(move |_, data| {
+                let client =
+                    stored_client(&updated_in, data.token_exchange_enabled.unwrap_or_default());
+                Box::pin(async move { Ok(client) })
+            });
+
+        let client = mocks
+            .build()
+            .update_client(
+                identity,
+                UpdateClientInput {
+                    realm_name: "acme".to_string(),
+                    client_id: existing_id,
+                    payload: UpdateClientRequest {
+                        name: None,
+                        client_id: None,
+                        enabled: None,
+                        direct_access_grants_enabled: None,
+                        oauth_device_code_grant_enabled: None,
+                        token_exchange_enabled: Some(true),
+                        require_pkce: None,
+                        access_token_lifetime: None,
+                        refresh_token_lifetime: None,
+                        id_token_lifetime: None,
+                        temporary_token_lifetime: None,
+                        maintenance_enabled: None,
+                        maintenance_reason: None,
+                        maintenance_session_strategy: None,
+                        backchannel_logout_uri: None,
+                        backchannel_logout_session_required: None,
+                        consent_required: None,
+                    },
+                },
+            )
+            .await
+            .expect("client is updated");
+
+        assert!(client.token_exchange_enabled);
     }
 }

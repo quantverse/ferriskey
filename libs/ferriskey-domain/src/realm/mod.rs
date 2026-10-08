@@ -1,4 +1,5 @@
 pub mod ports;
+pub mod scope;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -7,6 +8,7 @@ use thiserror::Error;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::common::locale::Locale;
 use crate::{generate_timestamp, generate_uuid_v7};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, Ord, PartialOrd, ToSchema)]
@@ -208,13 +210,24 @@ pub struct RealmSetting {
     pub email_verification_enabled: bool,
     pub email_verification_ttl_hours: i64,
     pub login_aliases: LoginAliases,
+    pub default_locale: String,
+    pub supported_locales: Vec<String>,
     pub require_mfa: bool,
+    /// Whether users may change their own username from the self-service
+    /// account page. Off by default: usernames are used as-is by login
+    /// aliases and federation mappings, so letting every user rename
+    /// themselves is an operator choice, not a default.
+    pub edit_username_enabled: bool,
     pub updated_at: DateTime<Utc>,
     pub lockout_threshold: i32,
     pub lockout_duration_seconds: i32,
     pub seawatch_pii_mode: String,
     #[serde(skip_serializing)]
     pub seawatch_pseudo_key: Option<String>,
+    pub webhook_retry_max_attempts: Option<i32>,
+    pub webhook_retry_base_delay_ms: Option<i32>,
+    pub webhook_retry_max_delay_ms: Option<i32>,
+    pub webhook_retry_max_total_delay_ms: Option<i32>,
 }
 
 impl RealmSetting {
@@ -242,12 +255,19 @@ impl RealmSetting {
             email_verification_enabled: false,
             email_verification_ttl_hours: 24,
             login_aliases: LoginAliases::default(),
+            default_locale: Locale::en().to_string(),
+            supported_locales: vec![Locale::en().to_string()],
             require_mfa: false,
+            edit_username_enabled: false,
             updated_at: now,
             lockout_threshold: 10,
             lockout_duration_seconds: 900,
             seawatch_pii_mode: "off".to_string(),
             seawatch_pseudo_key: None,
+            webhook_retry_max_attempts: None,
+            webhook_retry_base_delay_ms: None,
+            webhook_retry_max_delay_ms: None,
+            webhook_retry_max_total_delay_ms: None,
         }
     }
 }

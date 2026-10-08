@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use ferriskey_domain::{
     auth::Identity,
     common::app_errors::CoreError,
-    realm::{Realm, RealmId},
+    realm::{Realm, RealmId, scope::Unscoped},
 };
 use uuid::Uuid;
 
@@ -73,7 +73,7 @@ pub trait CompassFlowRepository: Send + Sync {
     fn get_flow_by_id(
         &self,
         flow_id: Uuid,
-    ) -> impl Future<Output = Result<Option<CompassFlow>, CoreError>> + Send;
+    ) -> impl Future<Output = Result<Option<Unscoped<CompassFlow>>, CoreError>> + Send;
 
     fn count_flows(
         &self,
@@ -81,9 +81,24 @@ pub trait CompassFlowRepository: Send + Sync {
         filter: FlowFilter,
     ) -> impl Future<Output = Result<i64, CoreError>> + Send;
 
+    /// Deletes flows started before `older_than`, with their steps. Compass is
+    /// a dashboard, not an archive: without a retention window `compass_flows`
+    /// grows for the lifetime of the deployment.
     fn purge_old_flows(
         &self,
         older_than: DateTime<Utc>,
+    ) -> impl Future<Output = Result<u64, CoreError>> + Send;
+
+    /// Marks flows still `pending` since before `started_before` as
+    /// [`FlowStatus::Expired`].
+    ///
+    /// Every abandoned `/auth` hit leaves a flow that nothing will ever
+    /// complete. Left alone they accumulate in `pending_count` and read as
+    /// "logins currently in progress", which is how a dashboard ends up
+    /// reporting thousands of concurrent logins on an idle realm.
+    fn expire_stale_flows(
+        &self,
+        started_before: DateTime<Utc>,
     ) -> impl Future<Output = Result<u64, CoreError>> + Send;
 
     fn get_stats(

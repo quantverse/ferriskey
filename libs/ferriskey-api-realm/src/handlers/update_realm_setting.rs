@@ -1,6 +1,8 @@
 use crate::validators::UpdateRealmSettingValidator;
 use axum::Extension;
-use ferriskey_core::domain::realm::ports::{RealmService, UpdateRealmSettingInput};
+use ferriskey_core::domain::realm::ports::{
+    GetRealmSettingInput, RealmService, UpdateRealmSettingInput,
+};
 
 use ferriskey_api_core::api_entities::api_error::{ApiError, ApiErrorResponse, ValidateJson};
 use ferriskey_api_core::api_entities::response::Response;
@@ -9,9 +11,117 @@ use ferriskey_api_core::app_state::AppState;
 use axum::extract::{Path, State};
 
 use ferriskey_core::domain::authentication::value_objects::Identity;
+use ferriskey_core::domain::common::locale::{Locale, LocaleError, SupportedLocales};
 use ferriskey_core::domain::realm::entities::Realm;
+use ferriskey_core::domain::webhook::entities::retry_policy::{RetryPolicy, RetryPolicyOverride};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+
+fn locale_rejected(field: &'static str, error: &LocaleError) -> ApiError {
+    let code = match error {
+        LocaleError::Malformed(_) => "malformed_locale",
+        LocaleError::Unsupported(_) => "unsupported_locale",
+        LocaleError::EmptySupportedSet => "empty_supported_locales",
+        LocaleError::DefaultNotSupported => "default_locale_not_supported",
+    };
+
+    ApiError::validation_error(field, code, error.to_string())
+}
+
+fn provided<'a, T>(
+    field: &'static str,
+    value: &'a Option<Option<T>>,
+) -> Result<Option<&'a T>, ApiError> {
+    match value {
+        None => Ok(None),
+        Some(None) => Err(ApiError::validation_error(
+            field,
+            "null_not_allowed",
+            format!("{field} must not be null"),
+        )),
+        Some(Some(value)) => Ok(Some(value)),
+    }
+}
+
+async fn resolve_locales(
+    state: &AppState,
+    identity: &Identity,
+    realm_name: &str,
+    payload: &UpdateRealmSettingValidator,
+) -> Result<Option<SupportedLocales>, ApiError> {
+    let requested_default = provided("default_locale", &payload.default_locale)?;
+    let requested_supported = provided("supported_locales", &payload.supported_locales)?;
+
+    if requested_default.is_none() && requested_supported.is_none() {
+        return Ok(None);
+    }
+
+    let stored = state
+        .service
+        .get_realm_setting_by_name(
+            identity.clone(),
+            GetRealmSettingInput {
+                realm_name: realm_name.to_string(),
+            },
+        )
+        .await
+        .map_err(ApiError::from)?;
+
+    let default = requested_default.unwrap_or(&stored.default_locale);
+    let supported = requested_supported.unwrap_or(&stored.supported_locales);
+
+    let default =
+        Locale::parse(default).map_err(|error| locale_rejected("default_locale", &error))?;
+    let supported = supported
+        .iter()
+        .map(|raw| Locale::parse(raw).map_err(|error| locale_rejected("supported_locales", &error)))
+        .collect::<Result<Vec<Locale>, ApiError>>()?;
+
+    SupportedLocales::new(default, supported)
+        .map(Some)
+        .map_err(|error| match error {
+            LocaleError::DefaultNotSupported => locale_rejected("default_locale", &error),
+            error => locale_rejected("supported_locales", &error),
+        })
+}
+
+fn non_negative(field: &str, value: Option<Option<i32>>) -> Result<Option<u32>, ApiError> {
+    match value.flatten() {
+        Some(value) => u32::try_from(value)
+            .map(Some)
+            .map_err(|_| ApiError::BadRequest(format!("{field} must not be negative").into())),
+        None => Ok(None),
+    }
+}
+
+fn ensure_retry_policy_is_valid(payload: &UpdateRealmSettingValidator) -> Result<(), ApiError> {
+    let candidate = RetryPolicyOverride {
+        max_attempts: non_negative(
+            "webhook_retry_max_attempts",
+            payload.webhook_retry_max_attempts,
+        )?,
+        base_delay_ms: non_negative(
+            "webhook_retry_base_delay_ms",
+            payload.webhook_retry_base_delay_ms,
+        )?,
+        max_delay_ms: non_negative(
+            "webhook_retry_max_delay_ms",
+            payload.webhook_retry_max_delay_ms,
+        )?,
+        max_total_delay_ms: non_negative(
+            "webhook_retry_max_total_delay_ms",
+            payload.webhook_retry_max_total_delay_ms,
+        )?,
+    };
+
+    if candidate.is_empty() {
+        return Ok(());
+    }
+
+    RetryPolicy::try_from(candidate)
+        .map(|_| ())
+        .map_err(|error| ApiError::BadRequest(error.to_string().into()))
+}
 
 #[derive(Debug, Serialize, Deserialize, ToSchema, PartialEq)]
 pub struct UpdateRealmSettingResponse {
@@ -32,6 +142,7 @@ pub struct UpdateRealmSettingResponse {
         (status = 400, description = "Invalid request data", body = ApiErrorResponse),
         (status = 401, description = "Realm not found", body = ApiErrorResponse),
         (status = 403, description = "Insufficient permissions", body = ApiErrorResponse),
+        (status = 422, description = "Invalid locale configuration", body = ApiErrorResponse),
         (status = 500, description = "Internal server error", body = ApiErrorResponse),
     ),
     request_body = UpdateRealmSettingValidator
@@ -42,6 +153,10 @@ pub async fn update_realm_setting(
     Extension(identity): Extension<Identity>,
     ValidateJson(payload): ValidateJson<UpdateRealmSettingValidator>,
 ) -> Result<Response<UpdateRealmSettingResponse>, ApiError> {
+    ensure_retry_policy_is_valid(&payload)?;
+
+    let locales = resolve_locales(&state, &identity, &name, &payload).await?;
+
     let realm = state
         .service
         .update_realm_setting(
@@ -68,9 +183,15 @@ pub async fn update_realm_setting(
                 lockout_threshold: payload.lockout_threshold,
                 lockout_duration_seconds: payload.lockout_duration_seconds,
                 login_aliases: payload.login_aliases,
+                locales,
                 seawatch_pii_mode: payload.seawatch_pii_mode,
                 seawatch_pseudo_key: payload.seawatch_pseudo_key,
                 require_mfa: payload.require_mfa,
+                edit_username_enabled: payload.edit_username_enabled,
+                webhook_retry_max_attempts: payload.webhook_retry_max_attempts,
+                webhook_retry_base_delay_ms: payload.webhook_retry_base_delay_ms,
+                webhook_retry_max_delay_ms: payload.webhook_retry_max_delay_ms,
+                webhook_retry_max_total_delay_ms: payload.webhook_retry_max_total_delay_ms,
             },
         )
         .await

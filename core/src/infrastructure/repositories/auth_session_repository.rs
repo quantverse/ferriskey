@@ -11,6 +11,7 @@ use crate::domain::authentication::{
     ports::AuthSessionRepository,
     value_objects::CodeChallengeMethod,
 };
+use crate::domain::realm::entities::{Scoped, Unscoped};
 
 impl TryFrom<crate::entity::auth_sessions::Model> for AuthSession {
     type Error = AuthenticationError;
@@ -62,6 +63,11 @@ impl TryFrom<crate::entity::auth_sessions::Model> for AuthSession {
             compass_flow_id: model.compass_flow_id,
             code_challenge: model.code_challenge,
             code_challenge_method,
+            user_session_id: model.user_session_id,
+            remember_me: model.remember_me,
+            reauth_session_id: model.reauth_session_id,
+            consent_token_hash: model.consent_token_hash,
+            prompt_consent: model.prompt_consent,
         })
     }
 }
@@ -104,6 +110,11 @@ impl AuthSessionRepository for PostgresAuthSessionRepository {
             compass_flow_id: Set(session.compass_flow_id),
             code_challenge: Set(session.code_challenge.clone()),
             code_challenge_method: Set(code_challenge_method),
+            user_session_id: Set(session.user_session_id),
+            consent_token_hash: Set(session.consent_token_hash.clone()),
+            prompt_consent: Set(session.prompt_consent),
+            remember_me: Set(session.remember_me),
+            reauth_session_id: Set(session.reauth_session_id),
         };
 
         let t = model
@@ -121,7 +132,7 @@ impl AuthSessionRepository for PostgresAuthSessionRepository {
     async fn get_by_session_code(
         &self,
         session_code: Uuid,
-    ) -> Result<AuthSession, AuthenticationError> {
+    ) -> Result<Unscoped<AuthSession>, AuthenticationError> {
         let session = crate::entity::auth_sessions::Entity::find()
             .filter(crate::entity::auth_sessions::Column::Id.eq(session_code))
             .one(&self.db)
@@ -133,10 +144,13 @@ impl AuthSessionRepository for PostgresAuthSessionRepository {
 
         let session = session.ok_or(AuthenticationError::NotFound)?.try_into()?;
 
-        Ok(session)
+        Ok(Unscoped::new(session))
     }
 
-    async fn get_by_code(&self, code: String) -> Result<Option<AuthSession>, AuthenticationError> {
+    async fn get_by_code(
+        &self,
+        code: String,
+    ) -> Result<Option<Unscoped<AuthSession>>, AuthenticationError> {
         let session = crate::entity::auth_sessions::Entity::find()
             .filter(crate::entity::auth_sessions::Column::Code.eq(code))
             .one(&self.db)
@@ -148,7 +162,7 @@ impl AuthSessionRepository for PostgresAuthSessionRepository {
 
         let session = session.map(AuthSession::try_from).transpose()?;
 
-        Ok(session)
+        Ok(session.map(Unscoped::new))
     }
 
     async fn update_code_and_user_id(
@@ -365,7 +379,7 @@ impl AuthSessionRepository for PostgresAuthSessionRepository {
 
     async fn update_authenticated(
         &self,
-        session_code: Uuid,
+        auth_session: &Scoped<AuthSession>,
         authenticated: bool,
     ) -> Result<(), AuthenticationError> {
         crate::entity::auth_sessions::Entity::update_many()
@@ -373,13 +387,162 @@ impl AuthSessionRepository for PostgresAuthSessionRepository {
                 crate::entity::auth_sessions::Column::Authenticated,
                 Expr::value(authenticated),
             )
-            .filter(crate::entity::auth_sessions::Column::Id.eq(session_code))
+            .filter(crate::entity::auth_sessions::Column::Id.eq(auth_session.get().id))
             .exec(&self.db)
             .await
             .map_err(|e| {
                 error!("Error updating session authenticated: {:?}", e);
                 AuthenticationError::Invalid
             })?;
+
+        Ok(())
+    }
+
+    async fn bind_user_session(
+        &self,
+        session_code: Uuid,
+        user_session_id: Uuid,
+    ) -> Result<(), AuthenticationError> {
+        let result = crate::entity::auth_sessions::Entity::update_many()
+            .col_expr(
+                crate::entity::auth_sessions::Column::UserSessionId,
+                Expr::value(user_session_id),
+            )
+            .filter(crate::entity::auth_sessions::Column::Id.eq(session_code))
+            .exec(&self.db)
+            .await
+            .map_err(|e| {
+                error!("Error binding auth session to a user session: {:?}", e);
+                AuthenticationError::Invalid
+            })?;
+
+        // An unbound auth session makes the code exchange open a second
+        // session instead of joining this one, so a miss is an error.
+        if result.rows_affected == 0 {
+            return Err(AuthenticationError::NotFound);
+        }
+
+        Ok(())
+    }
+
+    async fn set_reauth_session(
+        &self,
+        session_code: Uuid,
+        user_session_id: Uuid,
+    ) -> Result<(), AuthenticationError> {
+        let result = crate::entity::auth_sessions::Entity::update_many()
+            .col_expr(
+                crate::entity::auth_sessions::Column::ReauthSessionId,
+                Expr::value(user_session_id),
+            )
+            .filter(crate::entity::auth_sessions::Column::Id.eq(session_code))
+            .exec(&self.db)
+            .await
+            .map_err(|e| {
+                error!(
+                    "Error recording the session to re-authenticate into: {:?}",
+                    e
+                );
+                AuthenticationError::Invalid
+            })?;
+
+        if result.rows_affected == 0 {
+            return Err(AuthenticationError::NotFound);
+        }
+
+        Ok(())
+    }
+
+    async fn set_remember_me(
+        &self,
+        session_code: Uuid,
+        remember_me: bool,
+    ) -> Result<(), AuthenticationError> {
+        let result = crate::entity::auth_sessions::Entity::update_many()
+            .col_expr(
+                crate::entity::auth_sessions::Column::RememberMe,
+                Expr::value(remember_me),
+            )
+            .filter(crate::entity::auth_sessions::Column::Id.eq(session_code))
+            .exec(&self.db)
+            .await
+            .map_err(|e| {
+                error!("Error recording remember_me on an auth session: {:?}", e);
+                AuthenticationError::Invalid
+            })?;
+
+        if result.rows_affected == 0 {
+            return Err(AuthenticationError::NotFound);
+        }
+
+        Ok(())
+    }
+
+    async fn set_consent_token_hash(
+        &self,
+        session_code: Uuid,
+        consent_token_hash: String,
+    ) -> Result<(), AuthenticationError> {
+        let result = crate::entity::auth_sessions::Entity::update_many()
+            .col_expr(
+                crate::entity::auth_sessions::Column::ConsentTokenHash,
+                Expr::value(consent_token_hash),
+            )
+            .filter(crate::entity::auth_sessions::Column::Id.eq(session_code))
+            .exec(&self.db)
+            .await
+            .map_err(|e| {
+                error!("Error setting consent_token_hash: {:?}", e);
+                AuthenticationError::Invalid
+            })?;
+
+        if result.rows_affected == 0 {
+            return Err(AuthenticationError::NotFound);
+        }
+
+        Ok(())
+    }
+
+    async fn get_by_consent_token_hash(
+        &self,
+        consent_token_hash: String,
+    ) -> Result<Option<Unscoped<AuthSession>>, AuthenticationError> {
+        let session = crate::entity::auth_sessions::Entity::find()
+            .filter(crate::entity::auth_sessions::Column::ConsentTokenHash.eq(consent_token_hash))
+            .one(&self.db)
+            .await
+            .map_err(|e| {
+                error!("Error looking up session by consent_token_hash: {:?}", e);
+                AuthenticationError::InternalServerError
+            })?;
+
+        let session = session.map(AuthSession::try_from).transpose()?;
+
+        Ok(session.map(Unscoped::new))
+    }
+
+    async fn clear_consent_token_hash(
+        &self,
+        session_code: Uuid,
+        consent_token_hash: String,
+    ) -> Result<(), AuthenticationError> {
+        let result = crate::entity::auth_sessions::Entity::update_many()
+            .col_expr(
+                crate::entity::auth_sessions::Column::ConsentTokenHash,
+                Expr::value(Option::<String>::None),
+            )
+            .filter(crate::entity::auth_sessions::Column::Id.eq(session_code))
+            .filter(crate::entity::auth_sessions::Column::ConsentTokenHash.eq(consent_token_hash))
+            .exec(&self.db)
+            .await
+            .map_err(|e| {
+                error!("Error clearing consent_token_hash: {:?}", e);
+                AuthenticationError::Invalid
+            })?;
+
+        if result.rows_affected == 0 {
+            return Err(AuthenticationError::NotFound);
+        }
 
         Ok(())
     }
@@ -406,7 +569,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::domain::authentication::entities::{AuthSession, AuthSessionParams};
-    use crate::domain::realm::entities::RealmId;
+    use crate::domain::realm::entities::{Realm, RealmId, RealmScope};
 
     async fn setup() -> (PostgresAuthSessionRepository, Uuid, Uuid) {
         let base_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
@@ -463,6 +626,12 @@ mod tests {
         (PostgresAuthSessionRepository::new(db), realm_id, client_id)
     }
 
+    fn make_scope(realm_id: Uuid) -> RealmScope {
+        let mut realm = Realm::new(format!("test-realm-{realm_id}"));
+        realm.id = RealmId::new(realm_id);
+        RealmScope::from_realm(realm)
+    }
+
     fn make_session(realm_id: Uuid, client_id: Uuid, authenticated: bool) -> AuthSession {
         AuthSession::new(AuthSessionParams {
             realm_id: RealmId::new(realm_id),
@@ -481,6 +650,7 @@ mod tests {
             code_challenge: None,
             code_challenge_method: None,
             compass_flow_id: None,
+            prompt_consent: false,
         })
     }
 
@@ -537,7 +707,10 @@ mod tests {
         assert!(!after_first.authenticated, "ready for first exchange");
 
         // Token exchange marks the code as used (RFC 6749 §4.1.3).
-        repo.update_authenticated(created.id, true)
+        let scoped = Unscoped::new(after_first.clone())
+            .in_realm(&make_scope(realm_id))
+            .expect("the session belongs to the realm it was created in");
+        repo.update_authenticated(&scoped, true)
             .await
             .expect("mark used");
 
@@ -580,5 +753,20 @@ mod tests {
         );
         assert_eq!(updated.code, Some("fresh-code-with-user".into()));
         assert_eq!(updated.user_id, Some(user_id));
+    }
+
+    /// Binding an auth session that no longer exists must not report success,
+    /// otherwise the code exchange silently opens a second SSO session.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL — run with: cargo test -p ferriskey-core -- --ignored"]
+    async fn bind_user_session_fails_when_the_auth_session_is_gone() {
+        let (repo, _realm_id, _client_id) = setup().await;
+
+        let result = repo.bind_user_session(Uuid::new_v4(), Uuid::new_v4()).await;
+
+        assert!(
+            matches!(result, Err(AuthenticationError::NotFound)),
+            "binding an unknown auth session must fail, got {result:?}"
+        );
     }
 }

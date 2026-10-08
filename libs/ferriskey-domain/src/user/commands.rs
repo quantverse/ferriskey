@@ -30,6 +30,16 @@ pub struct ResetPasswordInput {
     pub realm_name: String,
 }
 
+pub struct ImportPasswordCredentialInput {
+    pub realm_name: String,
+    pub user_id: Uuid,
+    pub algorithm: String,
+    pub secret_data: String,
+    pub hash_iterations: u32,
+    pub salt: Option<String>,
+    pub temporary: bool,
+}
+
 pub struct AssignRoleInput {
     pub realm_name: String,
     pub user_id: Uuid,
@@ -42,6 +52,7 @@ pub struct BulkDeleteUsersInput {
 }
 
 pub struct CreateUserInput {
+    pub id: Option<Uuid>,
     pub realm_name: String,
     pub username: String,
     pub firstname: Option<String>,
@@ -53,6 +64,26 @@ pub struct CreateUserInput {
 pub struct GetUserInput {
     pub realm_name: String,
     pub user_id: Uuid,
+}
+
+pub struct GetOwnProfileInput {
+    pub realm_name: String,
+}
+
+/// Self-service profile edit. Unlike `UpdateUserInput`, there is no `enabled`,
+/// `email_verified` or `required_actions` field: those are administrative
+/// controls a user must never be able to flip on themselves.
+pub struct UpdateOwnProfileInput {
+    pub realm_name: String,
+    pub username: Option<String>,
+    pub firstname: Option<String>,
+    pub lastname: Option<String>,
+    pub email: Option<String>,
+}
+
+pub struct UpdateOwnLocaleInput {
+    pub realm_name: String,
+    pub locale: Option<String>,
 }
 
 pub struct GetUserAttributesInput {

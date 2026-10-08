@@ -7,10 +7,14 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::authentication::entities::AuthProtocol;
+use crate::client::entities::saml::InvalidSamlConfig;
+use crate::realm::scope::RealmOwned;
 use crate::{generate_random_string, generate_timestamp, realm::RealmId};
 
 pub mod redirect_uri;
 pub mod saml;
+pub mod token_exchange_policy;
 pub mod web_origin;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord, ToSchema)]
@@ -82,7 +86,7 @@ pub struct Client {
     pub client_id: String,
     pub secret: Option<Masked<String>>,
     pub realm_id: RealmId,
-    pub protocol: String,
+    pub protocol: AuthProtocol,
     pub public_client: bool,
     pub service_account_enabled: bool,
     pub direct_access_grants_enabled: bool,
@@ -91,6 +95,13 @@ pub struct Client {
     /// this disabled; only browserless devices (CLI, IoT, TVs) need it.
     pub oauth_device_code_grant_enabled: bool,
     pub require_pkce: bool,
+    pub token_exchange_enabled: bool,
+    /// Where FerrisKey POSTs a logout token when a session this client took
+    /// part in ends (OIDC Back-Channel Logout 1.0). `None` opts out.
+    pub backchannel_logout_uri: Option<String>,
+    /// Whether the client needs the `sid` claim in its logout tokens.
+    /// FerrisKey always sends it, so this only records what the client asked.
+    pub backchannel_logout_session_required: bool,
     pub client_type: ClientType,
     pub name: String,
     pub redirect_uris: Option<Vec<redirect_uri::RedirectUri>>,
@@ -103,6 +114,7 @@ pub struct Client {
     pub maintenance_session_strategy: MaintenanceSessionStrategy,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub consent_required: bool,
 }
 
 pub struct ClientConfig {
@@ -111,12 +123,13 @@ pub struct ClientConfig {
     pub client_id: String,
     pub secret: Option<String>,
     pub enabled: bool,
-    pub protocol: String,
+    pub protocol: AuthProtocol,
     pub public_client: bool,
     pub service_account_enabled: bool,
     pub client_type: ClientType,
     pub direct_access_grants_enabled: Option<bool>,
     pub oauth_device_code_grant_enabled: Option<bool>,
+    pub token_exchange_enabled: Option<bool>,
     pub access_token_lifetime: Option<i64>,
     pub refresh_token_lifetime: Option<i64>,
     pub id_token_lifetime: Option<i64>,
@@ -124,6 +137,13 @@ pub struct ClientConfig {
 }
 
 impl Client {
+    pub fn ensure_speaks_saml(&self) -> Result<(), InvalidSamlConfig> {
+        match self.protocol {
+            AuthProtocol::Saml => Ok(()),
+            other => Err(InvalidSamlConfig::ClientIsNotSaml(other.to_string())),
+        }
+    }
+
     pub fn secret_str(&self) -> Option<&str> {
         self.secret.as_ref().map(|secret| secret.expose().as_str())
     }
@@ -144,6 +164,9 @@ impl Client {
                 .oauth_device_code_grant_enabled
                 .unwrap_or_default(),
             require_pkce: false,
+            token_exchange_enabled: config.token_exchange_enabled.unwrap_or_default(),
+            backchannel_logout_uri: None,
+            backchannel_logout_session_required: true,
             client_type: config.client_type,
             name: config.name,
             redirect_uris: None,
@@ -156,6 +179,7 @@ impl Client {
             maintenance_session_strategy: MaintenanceSessionStrategy::default(),
             created_at: now,
             updated_at: now,
+            consent_required: false,
         }
     }
 
@@ -168,12 +192,15 @@ impl Client {
             client_id: client_id.clone(),
             secret: Some(Masked::new(generate_random_string())),
             realm_id,
-            protocol: "openid-connect".to_string(),
+            protocol: AuthProtocol::OpenIdConnect,
             public_client: false,
             service_account_enabled: false,
             direct_access_grants_enabled: false,
             oauth_device_code_grant_enabled: false,
             require_pkce: false,
+            token_exchange_enabled: false,
+            backchannel_logout_uri: None,
+            backchannel_logout_session_required: true,
             client_type: ClientType::Confidential,
             name: format!("{client_id} Client"),
             redirect_uris: None,
@@ -186,6 +213,63 @@ impl Client {
             maintenance_session_strategy: MaintenanceSessionStrategy::default(),
             created_at: now,
             updated_at: now,
+            consent_required: false,
         }
+    }
+}
+
+impl RealmOwned for Client {
+    fn realm_id(&self) -> RealmId {
+        self.realm_id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn client_speaking(protocol: AuthProtocol) -> Client {
+        Client::new(ClientConfig {
+            realm_id: RealmId::from(Uuid::new_v4()),
+            name: "webapp".to_string(),
+            client_id: "webapp".to_string(),
+            secret: None,
+            enabled: true,
+            protocol,
+            public_client: true,
+            service_account_enabled: false,
+            client_type: ClientType::Public,
+            direct_access_grants_enabled: None,
+            oauth_device_code_grant_enabled: None,
+            token_exchange_enabled: None,
+            access_token_lifetime: None,
+            refresh_token_lifetime: None,
+            id_token_lifetime: None,
+            temporary_token_lifetime: None,
+        })
+    }
+
+    #[test]
+    fn a_new_client_does_not_allow_token_exchange_by_default() {
+        assert!(!client_speaking(AuthProtocol::OpenIdConnect).token_exchange_enabled);
+    }
+
+    #[test]
+    fn a_saml_client_accepts_saml_settings() {
+        assert!(
+            client_speaking(AuthProtocol::Saml)
+                .ensure_speaks_saml()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn an_oidc_client_refuses_saml_settings() {
+        assert_eq!(
+            client_speaking(AuthProtocol::OpenIdConnect).ensure_speaks_saml(),
+            Err(InvalidSamlConfig::ClientIsNotSaml(
+                "openid-connect".to_string()
+            ))
+        );
     }
 }

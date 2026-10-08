@@ -3,12 +3,14 @@ use crate::{
     domain::{
         authentication::value_objects::Identity,
         common::entities::app_errors::CoreError,
-        role::entities::permission::Permissions,
+        role::entities::{GetUserRolesInput, Role, permission::Permissions},
         user::{
             entities::{
-                AssignRoleInput, CreateUserInput, DeleteUserAttributeInput, GetUserAttributesInput,
-                GetUserInput, GetUserPermissionsInput, ResetPasswordInput, SetUserAttributesInput,
-                UnassignRoleInput, UpdateUserInput, User, UserAttribute,
+                AssignRoleInput, CreateUserInput, DeleteUserAttributeInput, GetOwnProfileInput,
+                GetUserAttributesInput, GetUserInput, GetUserPermissionsInput,
+                ImportPasswordCredentialInput, ResetPasswordInput, SetUserAttributesInput,
+                UnassignRoleInput, UpdateOwnLocaleInput, UpdateOwnProfileInput, UpdateUserInput,
+                User, UserAttribute,
             },
             ports::UserService,
         },
@@ -55,6 +57,30 @@ impl UserService for ApplicationService {
         self.user_service.get_user(identity, input).await
     }
 
+    async fn get_own_profile(
+        &self,
+        identity: Identity,
+        input: GetOwnProfileInput,
+    ) -> Result<User, CoreError> {
+        self.user_service.get_own_profile(identity, input).await
+    }
+
+    async fn update_own_profile(
+        &self,
+        identity: Identity,
+        input: UpdateOwnProfileInput,
+    ) -> Result<User, CoreError> {
+        self.user_service.update_own_profile(identity, input).await
+    }
+
+    async fn update_own_locale(
+        &self,
+        identity: Identity,
+        input: UpdateOwnLocaleInput,
+    ) -> Result<User, CoreError> {
+        self.user_service.update_own_locale(identity, input).await
+    }
+
     async fn get_users(
         &self,
         identity: Identity,
@@ -69,6 +95,16 @@ impl UserService for ApplicationService {
         input: ResetPasswordInput,
     ) -> Result<(), CoreError> {
         self.user_service.reset_password(identity, input).await
+    }
+
+    async fn import_password_credential(
+        &self,
+        identity: Identity,
+        input: ImportPasswordCredentialInput,
+    ) -> Result<(), CoreError> {
+        self.user_service
+            .import_password_credential(identity, input)
+            .await
     }
 
     async fn unassign_role(
@@ -95,6 +131,14 @@ impl UserService for ApplicationService {
         self.user_service
             .get_user_permissions(identity, input)
             .await
+    }
+
+    async fn get_user_roles(
+        &self,
+        identity: Identity,
+        input: GetUserRolesInput,
+    ) -> Result<Vec<Role>, CoreError> {
+        self.user_service.get_user_roles(identity, input).await
     }
 
     async fn get_user_attributes(

@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { BaseQuery } from '.'
+import { apiErrorMessage } from '@/lib/api-error'
+import { translate } from '@/lib/i18n'
 
 export const useGetPortalLayouts = ({ realm = 'master' }: BaseQuery) => {
   return useQuery(
@@ -53,7 +55,7 @@ export const useCreatePortalLayout = () => {
       }).queryKey
 
       await queryClient.invalidateQueries({ queryKey: keys })
-      toast.success('Portal layout created successfully')
+      toast.success(translate('common:toast.portal_layout.created'))
     },
   })
 }
@@ -80,7 +82,7 @@ export const useUpdatePortalLayout = () => {
         queryClient.invalidateQueries({ queryKey: itemKey }),
         queryClient.invalidateQueries({ queryKey: publicKey }),
       ])
-      toast.success('Portal layout saved successfully')
+      toast.success(translate('common:toast.portal_layout.saved'))
     },
   })
 }
@@ -96,7 +98,7 @@ export const useDeletePortalLayout = () => {
       }).queryKey
 
       await queryClient.invalidateQueries({ queryKey: listKey })
-      toast.success('Portal layout deleted successfully')
+      toast.success(translate('common:toast.portal_layout.deleted'))
     },
   })
 }
@@ -121,7 +123,30 @@ export const useSetDefaultPortalLayout = () => {
         queryClient.invalidateQueries({ queryKey: listKey }),
         queryClient.invalidateQueries({ queryKey: publicKey }),
       ])
-      toast.success('Default portal layout updated')
+      toast.success(translate('common:toast.portal_layout.default_updated'))
+    },
+  })
+}
+
+export const useImportPortalLayout = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    ...window.tanstackApi.mutation('post', '/realms/{realm_name}/portal-layouts/import')
+      .mutationOptions,
+    onSuccess: async (_, variables) => {
+      const keys = window.tanstackApi.get('/realms/{realm_name}/portal-layouts', {
+        path: { realm_name: variables.path.realm_name },
+      }).queryKey
+
+      await queryClient.invalidateQueries({ queryKey: keys })
+      toast.success(translate('common:toast.portal_layout.imported'))
+    },
+    // The server refuses a file that belongs to the other builder or that uses
+    // a format version it cannot read; its message says which, so surface it.
+    onError: (error) => {
+      toast.error(translate('common:toast.import_failed'), {
+        description: apiErrorMessage(error),
+      })
     },
   })
 }

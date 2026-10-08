@@ -1,6 +1,10 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import type { PostEndpoints, Schemas } from './api.client'
+import { apiErrorReason, errorMessageFromBody, type ApiRequestError } from '@/lib/api-error'
+import { translate } from '@/lib/i18n'
+
+export const SESSION_EXPIRED_REASON = 'session_expired'
 
 const TOKEN_PATH: keyof PostEndpoints = '/realms/{realm_name}/protocol/openid-connect/token'
 const LOGOUT_PATH: keyof PostEndpoints = '/realms/{realm_name}/protocol/openid-connect/logout'
@@ -104,42 +108,31 @@ export const useAuthenticateMutation = () => {
       })
 
       if (!response.ok) {
-        let errorMessage = `HTTP ${response.status}: ${response.statusText}`
-        let errorCode: string | undefined
+        let errorBody: Record<string, unknown> | undefined
         try {
-          const errorBody = await response.json()
-          if (errorBody.message) {
-            errorMessage = errorBody.message
-          }
-          if (errorBody.code) {
-            errorCode = errorBody.code
-          }
+          errorBody = await response.json()
         } catch {
-          // Keep default error message when body is not JSON.
+          errorBody = undefined
         }
 
-        // Session-expired path: the authenticate endpoint maintains a
-        // server-side flow session (csrf / state cookie) separate from
-        // the access token. When that expires, the only recovery is to
-        // restart the login — surface a toast with a "Reload" action.
-        // We match on the *message*, not just the status, because a 401
-        // also covers normal "invalid credentials" responses which need
-        // a very different error treatment (see below — those are surfaced
-        // by the caller via the mutation's onError).
-        const isSessionExpired =
-          errorCode === 'E_UNAUTHORIZED' &&
-          /session\s+expired/i.test(errorMessage)
-        if (isSessionExpired) {
-          toast.error('Your login session expired. Please restart the sign-in.', {
+        const error: ApiRequestError = new Error(
+          errorMessageFromBody(errorBody) ?? `HTTP ${response.status}: ${response.statusText}`
+        )
+        error.status = response.status
+        error.data = errorBody
+
+        if (apiErrorReason(error) === SESSION_EXPIRED_REASON) {
+          toast.error(translate('common:session.login_expired'), {
             action: {
-              label: 'Reload',
+              label: translate('common:action.reload'),
               onClick: () => {
                 window.location.reload()
               },
             },
           })
         }
-        throw new Error(errorMessage)
+
+        throw error
       }
 
       return (await response.json()) as Schemas.AuthenticateResponse
@@ -267,16 +260,19 @@ export const useResendVerificationEmailMutation = () => {
       })
 
       if (!response.ok) {
-        let errorMessage = `HTTP ${response.status}: ${response.statusText}`
+        let errorBody: Record<string, unknown> | undefined
         try {
-          const errorBody = await response.json()
-          if (errorBody.message) {
-            errorMessage = errorBody.message
-          }
+          errorBody = await response.json()
         } catch {
-          // Keep default error message when body is not JSON.
+          errorBody = undefined
         }
-        throw new Error(errorMessage)
+
+        const error: ApiRequestError = new Error(
+          errorMessageFromBody(errorBody) ?? `HTTP ${response.status}: ${response.statusText}`
+        )
+        error.status = response.status
+        error.data = errorBody
+        throw error
       }
 
       return (await response.json()) as ResendVerificationEmailResponse

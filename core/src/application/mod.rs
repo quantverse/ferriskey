@@ -1,7 +1,15 @@
 use std::sync::Arc;
 
 use ferriskey_compass::recorder::FlowRecorder;
+use ferriskey_webhook::endpoint::PrivateEndpoints;
 
+use crate::domain::authentication::backchannel_logout::{
+    BackchannelLogoutConfig, BackchannelLogoutServiceImpl,
+};
+use crate::infrastructure::backchannel_logout::{
+    BackchannelLogoutDispatcher, HttpLogoutTokenSender, KeystoreLogoutTokenSigner,
+    NotifyingUserSessionRepository, PostgresSessionParticipantRepository,
+};
 use crate::{
     domain::{
         abyss::{
@@ -17,8 +25,12 @@ use crate::{
             },
             mapper_engine::MapperEngine,
             services::AuthServiceImpl,
+            token_exchange::TokenExchangeServiceImpl,
         },
-        client::services::ClientServiceImpl,
+        client::{
+            services::ClientServiceImpl,
+            token_exchange_policy_services::TokenExchangePolicyServiceImpl,
+        },
         common::{
             FerriskeyConfig, entities::app_errors::CoreError, policies::FerriskeyPolicy,
             services::CoreServiceImpl,
@@ -37,6 +49,7 @@ use crate::{
         portal_theme::services::PortalThemeServiceImpl,
         realm::services::{MailServiceImpl, RealmServiceImpl},
         role::services::RoleServiceImpl,
+        saml::services::SamlServiceImpl,
         seawatch::services::SecurityEventServiceImpl,
         session::services::UserSessionManagementServiceImpl,
         trident::services::TridentServiceImpl,
@@ -55,10 +68,12 @@ use crate::{
             post_logout_redirect_uri_postgres_repository::PostgresPostLogoutRedirectUriRepository,
             redirect_uri_postgres_repository::PostgresRedirectUriRepository,
             saml_postgres_repository::PostgresClientSamlRepository,
+            token_exchange_policy_postgres_repository::PostgresTokenExchangePolicyRepository,
             web_origin_postgres_repository::PostgresWebOriginRepository,
         },
         compass::{
             repositories::{PostgresCompassFlowRepository, PostgresCompassFlowStepRepository},
+            retention::compass_retention_task,
             writer::compass_writer_task,
         },
         db::postgres::{Postgres, PostgresConfig},
@@ -93,7 +108,6 @@ use crate::{
         },
         repositories::{
             access_token_repository::PostgresAccessTokenRepository,
-            argon2_hasher::Argon2HasherRepository,
             auth_session_repository::PostgresAuthSessionRepository,
             credential_repository::PostgresCredentialRepository,
             device_auth_repository::PostgresDeviceAuthRepository,
@@ -101,6 +115,7 @@ use crate::{
             keystore_repository::PostgresKeyStoreRepository,
             login_action_token_repository::PostgresLoginActionTokenRepository,
             magic_link_repository::PostgresMagicLinkRepository,
+            password_hasher::PasswordHasherRepository,
             password_policy_repository::PostgresPasswordPolicyRepository,
             password_reset_token_repository::PostgresPasswordResetTokenRepository,
             portal_layouts_repository::PostgresPortalLayoutsRepository,
@@ -120,18 +135,22 @@ use crate::{
             },
             repository::PostgresUserRepository,
         },
+        webhook::repositories::webhook_delivery_repository::PostgresWebhookDeliveryRepository,
         webhook::repositories::webhook_repository::PostgresWebhookRepository,
+        webhook::worker::{webhook_delivery_retention_task, webhook_delivery_worker_task},
     },
 };
 
 pub mod services;
 
 pub mod abyss;
+pub mod account_security;
 pub mod aegis;
 pub mod auth;
 pub mod broker;
 pub mod client;
 pub mod compass;
+pub mod consent;
 pub mod credential;
 pub mod email_template;
 pub mod health;
@@ -140,11 +159,14 @@ pub mod mail;
 pub mod maintenance;
 pub mod migrate;
 pub mod organization;
+pub mod other_sessions_revocation;
 pub mod portal_layouts;
 pub mod portal_theme;
 pub mod realm;
 pub mod role;
+pub mod saml;
 pub mod seawatch;
+pub mod sso_session;
 pub mod token_revocation;
 pub mod trident;
 pub mod user;
@@ -173,7 +195,7 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
     let client = Arc::new(PostgresClientRepository::new(postgres.get_db()));
     let user = Arc::new(PostgresUserRepository::new(postgres.get_db()));
     let credential = Arc::new(PostgresCredentialRepository::new(postgres.get_db()));
-    let hasher = Arc::new(Argon2HasherRepository::new());
+    let hasher = Arc::new(PasswordHasherRepository::new());
     let auth_session = Arc::new(PostgresAuthSessionRepository::new(postgres.get_db()));
     let device_auth = Arc::new(PostgresDeviceAuthRepository::new(postgres.get_db()));
     let login_action_token = Arc::new(PostgresLoginActionTokenRepository::new(postgres.get_db()));
@@ -182,6 +204,9 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
         postgres.get_db(),
     ));
     let web_origin = Arc::new(PostgresWebOriginRepository::new(postgres.get_db()));
+    let token_exchange_policy = Arc::new(PostgresTokenExchangePolicyRepository::new(
+        postgres.get_db(),
+    ));
     let client_saml = Arc::new(PostgresClientSamlRepository::new(postgres.get_db()));
     let role = Arc::new(PostgresRoleRepository::new(postgres.get_db()));
     let keystore = Arc::new(PostgresKeyStoreRepository::new(postgres.get_db()));
@@ -190,10 +215,34 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
         Arc::new(PostgresUserRequiredActionRepository::new(postgres.get_db()));
     let user_attribute = Arc::new(PostgresUserAttributeRepository::new(postgres.get_db()));
     let health_check = Arc::new(PostgresHealthCheckRepository::new(postgres.get_db()));
-    let webhook = Arc::new(PostgresWebhookRepository::new(postgres.get_db()));
+    let private_endpoints = PrivateEndpoints::from_allowed(config.webhook_allow_private_endpoints);
+    if config.webhook_allow_private_endpoints {
+        tracing::warn!(
+            "WEBHOOK_ALLOW_PRIVATE_ENDPOINTS is on: webhooks may reach loopback and private addresses. Never enable this in production."
+        );
+    }
+    let webhook = Arc::new(PostgresWebhookRepository::new(
+        postgres.get_db(),
+        private_endpoints,
+    ));
+    let webhook_delivery = Arc::new(PostgresWebhookDeliveryRepository::new(postgres.get_db()));
     let refresh_token = Arc::new(PostgresRefreshTokenRepository::new(postgres.get_db()));
     let access_token = Arc::new(PostgresAccessTokenRepository::new(postgres.get_db()));
-    let user_session = Arc::new(PostgresUserSessionRepository::new(postgres.get_db()));
+    // Every session deleted through this store sends a logout token to the
+    // clients that took part in it (OIDC Back-Channel Logout).
+    let backchannel_logout =
+        BackchannelLogoutDispatcher::spawn(Arc::new(BackchannelLogoutServiceImpl::new(
+            realm.clone(),
+            client.clone(),
+            Arc::new(KeystoreLogoutTokenSigner::new(keystore.clone())),
+            Arc::new(HttpLogoutTokenSender::new(private_endpoints)),
+            BackchannelLogoutConfig::default(),
+        )));
+    let user_session = Arc::new(NotifyingUserSessionRepository::new(
+        Arc::new(PostgresUserSessionRepository::new(postgres.get_db())),
+        Arc::new(PostgresSessionParticipantRepository::new(postgres.get_db())),
+        backchannel_logout,
+    ));
     let token_revocation = Arc::new(
         crate::application::token_revocation::TokenRevocationAdapter::new(
             access_token.clone(),
@@ -201,15 +250,46 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
             user_session.clone(),
         ),
     );
+    let other_sessions_revocation = Arc::new(
+        crate::application::other_sessions_revocation::OtherSessionsRevocationAdapter::new(
+            access_token.clone(),
+            refresh_token.clone(),
+            user_session.clone(),
+        ),
+    );
+    let elevation = Arc::new(
+        crate::infrastructure::account_security::repositories::elevation_repository::PostgresElevationRepository::new(
+            postgres.get_db(),
+        ),
+    );
+    let passkey_registration = Arc::new(
+        crate::infrastructure::account_security::repositories::passkey_registration_repository::PostgresPasskeyRegistrationRepository::new(
+            postgres.get_db(),
+        ),
+    );
     let recovery_code = Arc::new(RandBytesRecoveryCodeRepository::new(hasher.clone()));
     let security_event = Arc::new(PostgresSecurityEventRepository::new(postgres.get_db()));
+    let consent_decision = Arc::new(
+        crate::infrastructure::consent::repositories::consent_decision_postgres_repository::PostgresConsentDecisionRepository::new(
+            postgres.get_db(),
+        ),
+    );
+    let consent_service = Arc::new(ferriskey_consent::ConsentServiceImpl::new(
+        consent_decision.clone(),
+    ));
+    let sso_session = Arc::new(crate::application::sso_session::SsoSessionAdapter::new(
+        user_session.clone(),
+        security_event.clone(),
+        realm.clone(),
+        client.clone(),
+    ));
     let identity_provider = Arc::new(PostgresIdentityProviderRepository::new(postgres.get_db()));
     let federation = Arc::new(FederationRepositoryImpl::new(postgres.get_db()));
     let broker_auth_session = Arc::new(PostgresBrokerAuthSessionRepository::new(postgres.get_db()));
     let identity_provider_link = Arc::new(PostgresIdentityProviderLinkRepository::new(
         postgres.get_db(),
     ));
-    let oauth_client = Arc::new(ReqwestOAuthClient::new());
+    let oauth_client = Arc::new(ReqwestOAuthClient::new(private_endpoints));
     let magic_link = Arc::new(PostgresMagicLinkRepository::new(postgres.get_db()));
     let client_scope = Arc::new(PostgresClientScopeRepository::new(postgres.get_db()));
     let protocol_mapper = Arc::new(PostgresProtocolMapperRepository::new(postgres.get_db()));
@@ -257,6 +337,18 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
         compass_rx,
         PostgresCompassFlowRepository::new(postgres.get_db()),
         PostgresCompassFlowStepRepository::new(postgres.get_db()),
+    ));
+    tokio::spawn(compass_retention_task(PostgresCompassFlowRepository::new(
+        postgres.get_db(),
+    )));
+    tokio::spawn(webhook_delivery_worker_task(
+        webhook_delivery.as_ref().clone(),
+        webhook.as_ref().clone(),
+        PostgresSecurityEventRepository::new(postgres.get_db()),
+        private_endpoints,
+    ));
+    tokio::spawn(webhook_delivery_retention_task(
+        webhook_delivery.as_ref().clone(),
     ));
     let flow_recorder = FlowRecorder::new(compass_tx);
 
@@ -310,6 +402,8 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
         login_action_token.clone(),
         Arc::new(MapperEngine::new()),
         flow_recorder.clone(),
+        consent_service.clone(),
+        config.webapp_url.clone(),
     );
 
     // The auth service doubles as the device flow's token issuer.
@@ -318,6 +412,15 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
         webhook.clone(),
         Arc::new(auth_service.clone()),
         DeviceFlowConfig::default(),
+    );
+
+    let token_exchange_service = TokenExchangeServiceImpl::new(
+        client.clone(),
+        user.clone(),
+        token_exchange_policy.clone(),
+        security_event.clone(),
+        Arc::new(auth_service.clone()),
+        flow_recorder.clone(),
     );
 
     tokio::spawn(purge_expired_device_sessions_task(
@@ -337,6 +440,17 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
         ),
         auth_service,
         device_flow_service,
+        token_exchange_service,
+        saml_service: SamlServiceImpl::new(
+            realm.clone(),
+            client.clone(),
+            client_saml.clone(),
+            user.clone(),
+            user_attribute.clone(),
+            auth_session.clone(),
+            keystore.clone(),
+            flow_recorder.clone(),
+        ),
         client_service: ClientServiceImpl::new(
             realm.clone(),
             user.clone(),
@@ -352,9 +466,16 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
             scope_mapping.clone(),
             policy.clone(),
         ),
+        token_exchange_policy_service: TokenExchangePolicyServiceImpl::new(
+            realm.clone(),
+            client.clone(),
+            token_exchange_policy.clone(),
+            policy.clone(),
+        ),
         credential_service: CredentialServiceImpl::new(
             realm.clone(),
             credential.clone(),
+            user.clone(),
             policy.clone(),
         ),
         health_service: HealthServiceImpl::new(health_check.clone()),
@@ -379,7 +500,6 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
             role.clone(),
             security_event.clone(),
             webhook.clone(),
-            user_role.clone(),
             policy.clone(),
         ),
         security_event_service: SecurityEventServiceImpl::new(
@@ -387,6 +507,7 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
             security_event.clone(),
             policy.clone(),
         ),
+        consent_service: consent_service.clone(),
         trident_service: TridentServiceImpl::new(
             credential.clone(),
             recovery_code.clone(),
@@ -407,7 +528,23 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
             otp_enrollment.clone(),
             user_role.clone(),
             token_revocation.clone(),
+            sso_session.clone(),
+            flow_recorder.clone(),
         ),
+        account_security_service:
+            crate::domain::account_security::services::AccountSecurityServiceImpl::new(
+                credential.clone(),
+                hasher.clone(),
+                user.clone(),
+                realm.clone(),
+                password_policy.clone(),
+                otp_enrollment.clone(),
+                user_role.clone(),
+                elevation.clone(),
+                other_sessions_revocation.clone(),
+                user_required_action.clone(),
+                passkey_registration.clone(),
+            ),
         user_service: UserServiceImpl::new(
             realm.clone(),
             user.clone(),
@@ -423,7 +560,13 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
             token_revocation.clone(),
             policy.clone(),
         ),
-        webhook_service: WebhookServiceImpl::new(realm.clone(), webhook.clone(), policy.clone()),
+        webhook_service: WebhookServiceImpl::new(
+            realm.clone(),
+            webhook.clone(),
+            webhook_delivery.clone(),
+            policy.clone(),
+            private_endpoints,
+        ),
         email_template_service: EmailTemplateServiceImpl::new(
             realm.clone(),
             email_template.clone(),
@@ -519,6 +662,7 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
             realm.clone(),
             user.clone(),
             user_role.clone(),
+            role.clone(),
             organization.clone(),
             group.clone(),
             group_member.clone(),
@@ -529,6 +673,7 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
         organization_member_role_service: OrganizationMemberRoleServiceImpl::new(
             realm.clone(),
             user_role.clone(),
+            role.clone(),
             organization.clone(),
             organization_member.clone(),
             organization_member_role.clone(),
@@ -551,6 +696,7 @@ pub async fn create_service(config: FerriskeyConfig) -> Result<ApplicationServic
 
 #[cfg(test)]
 mod tests {
+    use crate::domain::authentication::entities::AuthProtocol;
     use std::env;
 
     use sqlx::Executor;
@@ -637,6 +783,7 @@ mod tests {
             .expect("run migrations");
 
         let app = create_service(FerriskeyConfig {
+            webhook_allow_private_endpoints: false,
             database: crate::domain::common::DatabaseConfig {
                 host: db_host,
                 port: db_port,
@@ -679,6 +826,7 @@ mod tests {
             .realm_service
             .user_repository
             .create_user(CreateUserRequest {
+                id: None,
                 realm_id: realm.id,
                 client_id: None,
                 username: "test-user".to_string(),
@@ -719,10 +867,12 @@ mod tests {
                     realm_name: realm_name.clone(),
                     enabled: true,
                     name: "Test Client".to_string(),
-                    protocol: "openid-connect".to_string(),
+                    protocol: AuthProtocol::OpenIdConnect,
                     service_account_enabled: false,
                     direct_access_grants_enabled: false,
                     oauth_device_code_grant_enabled: false,
+                    token_exchange_enabled: false,
+                    consent_required: false,
                 },
             )
             .await
@@ -809,6 +959,7 @@ mod tests {
             .expect("run migrations");
 
         let app = create_service(FerriskeyConfig {
+            webhook_allow_private_endpoints: false,
             database: crate::domain::common::DatabaseConfig {
                 host: db_host,
                 port: db_port,

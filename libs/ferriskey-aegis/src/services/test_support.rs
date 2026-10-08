@@ -11,16 +11,18 @@
 //! a mapper through the wrong scope — fails the test instead of silently
 //! returning another tenant's row.
 
+use ferriskey_domain::authentication::entities::AuthProtocol;
 use std::sync::Arc;
 
 use chrono::Utc;
 use uuid::Uuid;
 
+use ferriskey_authz::FerriskeyPolicy;
 use ferriskey_domain::client::entities::{Client, ClientType, MaintenanceSessionStrategy};
 use ferriskey_domain::client::ports::MockClientRepository;
 use ferriskey_domain::common::app_errors::CoreError;
-use ferriskey_domain::common::policies::FerriskeyPolicy;
 use ferriskey_domain::realm::ports::MockRealmRepository;
+use ferriskey_domain::realm::scope::Unscoped;
 use ferriskey_domain::realm::{Realm, RealmId};
 use ferriskey_domain::role::entities::Role;
 use ferriskey_domain::user::entities::User;
@@ -61,6 +63,7 @@ pub(crate) fn make_user(realm: &Realm) -> User {
         updated_at: Utc::now(),
         failed_login_attempts: 0,
         locked_until: None,
+        locale: None,
     }
 }
 
@@ -86,11 +89,12 @@ pub(crate) fn make_client(id: Uuid, realm_id: RealmId) -> Client {
         client_id: "app".to_string(),
         secret: None,
         realm_id,
-        protocol: "openid-connect".to_string(),
+        protocol: AuthProtocol::OpenIdConnect,
         public_client: false,
         service_account_enabled: false,
         direct_access_grants_enabled: false,
         oauth_device_code_grant_enabled: false,
+        token_exchange_enabled: false,
         require_pkce: false,
         client_type: ClientType::Confidential,
         name: "app".to_string(),
@@ -104,6 +108,9 @@ pub(crate) fn make_client(id: Uuid, realm_id: RealmId) -> Client {
         maintenance_session_strategy: MaintenanceSessionStrategy::Expire,
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        backchannel_logout_uri: None,
+        backchannel_logout_session_required: true,
+        consent_required: false,
     }
 }
 
@@ -186,7 +193,7 @@ pub(crate) fn mock_client_repository(clients: Vec<Client>) -> MockClientReposito
                 .iter()
                 .find(|client| client.id == id && client.realm_id == realm_id)
                 .cloned();
-            Box::pin(async move { found.ok_or(CoreError::NotFound) })
+            Box::pin(async move { found.map(Unscoped::new).ok_or(CoreError::NotFound) })
         });
     repository
 }

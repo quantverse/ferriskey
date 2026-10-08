@@ -1,23 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useNavigate } from 'react-router'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
+import { AUTH_NAMESPACE } from '../constants'
 
 type Options = {
   isRedirecting: boolean
   isSessionError: boolean
   getOAuthParams: () => Promise<{ query: string; realm: string }>
-  getAuthParamsFromUrl: () => { clientId: string; redirectUri: string }
-  resetAuthenticate: () => void
 }
 
-export function useSessionRefresh({
-  isRedirecting,
-  isSessionError,
-  getOAuthParams,
-  getAuthParamsFromUrl,
-  resetAuthenticate,
-}: Options) {
-  const navigate = useNavigate()
+export function useSessionRefresh({ isRedirecting, isSessionError, getOAuthParams }: Options) {
+  const { t } = useTranslation(AUTH_NAMESPACE)
   const [showSessionBar, setShowSessionBar] = useState(false)
   const [countdown, setCountdown] = useState<number | null>(null)
   const timerRef = useRef<number | null>(null)
@@ -49,38 +42,16 @@ export function useSessionRefresh({
   const restartAuthFlow = useCallback(async () => {
     cancelAutoRefresh()
 
-    const { query, realm } = await getOAuthParams()
-
-    await fetch(`${window.apiUrl}/realms/${realm}/protocol/openid-connect/auth?${query}`, {
-      credentials: 'include',
-      redirect: 'manual',
-    })
-
     try {
-      resetAuthenticate()
+      const { query, realm } = await getOAuthParams()
 
-      const { clientId: cId, redirectUri: rUri } = getAuthParamsFromUrl()
-      const newState = new URLSearchParams(query).get('state') ?? crypto.randomUUID()
-
-      navigate(
-        `/realms/${realm}/authentication/login?client_id=${cId}&redirect_uri=${rUri}&state=${newState}`,
-        { replace: true }
-      )
-
-      setShowSessionBar(false)
-      scheduleSessionExpirationBar()
-      toast.success('Session refreshed', { description: 'You can now log in again.' })
+      window.location.href = `${window.apiUrl}/realms/${realm}/protocol/openid-connect/auth?${query}`
     } catch {
-      toast.error('Session refresh failed', { description: 'Please try again.' })
+      toast.error(t('session.refresh_failed'), {
+        description: t('session.refresh_failed_description'),
+      })
     }
-  }, [
-    cancelAutoRefresh,
-    getOAuthParams,
-    getAuthParamsFromUrl,
-    navigate,
-    scheduleSessionExpirationBar,
-    resetAuthenticate,
-  ])
+  }, [cancelAutoRefresh, getOAuthParams, t])
 
   useEffect(() => {
     restartAuthFlowRef.current = restartAuthFlow

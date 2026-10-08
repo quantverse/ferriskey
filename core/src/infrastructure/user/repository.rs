@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::domain::{
     common::entities::app_errors::CoreError,
-    realm::entities::RealmId,
+    realm::entities::{RealmId, Scoped, Unscoped},
     user::{
         entities::{RequiredAction, User, UserConfig},
         ports::UserRepository,
@@ -67,6 +67,7 @@ impl PostgresUserRepository {
 impl UserRepository for PostgresUserRepository {
     async fn create_user(&self, dto: CreateUserRequest) -> Result<User, CoreError> {
         let user = User::new(UserConfig {
+            id: dto.id,
             client_id: dto.client_id,
             email: dto.email,
             email_verified: dto.email_verified,
@@ -91,6 +92,7 @@ impl UserRepository for PostgresUserRepository {
             updated_at: Set(user.updated_at.naive_utc()),
             failed_login_attempts: Set(0),
             locked_until: Set(None),
+            locale: Set(user.locale),
         };
 
         let t =
@@ -170,7 +172,7 @@ impl UserRepository for PostgresUserRepository {
     }
 
     #[instrument]
-    async fn get_by_client_id(&self, client_id: Uuid) -> Result<User, CoreError> {
+    async fn get_by_client_id(&self, client_id: Uuid) -> Result<Unscoped<User>, CoreError> {
         let user = crate::entity::users::Entity::find()
             .filter(crate::entity::users::Column::ClientId.eq(client_id))
             .one(&self.db)
@@ -179,10 +181,10 @@ impl UserRepository for PostgresUserRepository {
             .ok_or(CoreError::NotFound)?;
 
         let user = user.into();
-        Ok(user)
+        Ok(Unscoped::new(user))
     }
 
-    async fn get_by_id(&self, id: Uuid) -> Result<User, CoreError> {
+    async fn get_by_id(&self, id: Uuid) -> Result<Unscoped<User>, CoreError> {
         let users_model = crate::entity::users::Entity::find()
             .filter(crate::entity::users::Column::Id.eq(id))
             .find_also_related(crate::entity::realms::Entity)
@@ -219,7 +221,7 @@ impl UserRepository for PostgresUserRepository {
             user.realm = Some(realm_model.clone().into());
         }
 
-        Ok(user)
+        Ok(Unscoped::new(user))
     }
 
     async fn find_by_realm_id(&self, realm_id: RealmId) -> Result<Vec<User>, CoreError> {
@@ -275,8 +277,8 @@ impl UserRepository for PostgresUserRepository {
         Ok(rows.rows_affected)
     }
 
-    async fn delete_user(&self, user_id: Uuid) -> Result<u64, CoreError> {
-        let rows = crate::entity::users::Entity::delete_by_id(user_id)
+    async fn delete_user(&self, user: &Scoped<User>) -> Result<u64, CoreError> {
+        let rows = crate::entity::users::Entity::delete_by_id(user.get().id)
             .exec(&self.db)
             .await
             .map_err(|_| CoreError::InternalServerError)?;
@@ -284,9 +286,13 @@ impl UserRepository for PostgresUserRepository {
         Ok(rows.rows_affected)
     }
 
-    async fn update_user(&self, user_id: Uuid, dto: UpdateUserRequest) -> Result<User, CoreError> {
+    async fn update_user(
+        &self,
+        user: &Scoped<User>,
+        dto: UpdateUserRequest,
+    ) -> Result<User, CoreError> {
         let user = crate::entity::users::Entity::find()
-            .filter(crate::entity::users::Column::Id.eq(user_id))
+            .filter(crate::entity::users::Column::Id.eq(user.get().id))
             .one(&self.db)
             .await
             .map_err(|_| CoreError::NotFound)?;
@@ -295,6 +301,9 @@ impl UserRepository for PostgresUserRepository {
 
         let mut active_model: crate::entity::users::ActiveModel = user.into();
 
+        if let Some(username) = dto.username {
+            active_model.username = Set(username);
+        }
         active_model.firstname = Set(dto.firstname);
         active_model.lastname = Set(dto.lastname);
         active_model.email = Set(dto.email);
@@ -312,6 +321,33 @@ impl UserRepository for PostgresUserRepository {
                     }
                 },
             )?;
+
+        Ok(updated_user.into())
+    }
+
+    #[instrument(skip(self), err)]
+    async fn update_locale(
+        &self,
+        user: &Scoped<User>,
+        locale: Option<String>,
+    ) -> Result<User, CoreError> {
+        let user = crate::entity::users::Entity::find()
+            .filter(crate::entity::users::Column::Id.eq(user.get().id))
+            .one(&self.db)
+            .await
+            .map_err(|e| {
+                error!("error finding user for locale update: {:?}", e);
+                CoreError::InternalServerError
+            })?
+            .ok_or(CoreError::NotFound)?;
+
+        let mut active_model: crate::entity::users::ActiveModel = user.into();
+        active_model.locale = Set(locale);
+
+        let updated_user = active_model.update(&self.db).await.map_err(|e| {
+            error!("error updating user locale: {:?}", e);
+            CoreError::InternalServerError
+        })?;
 
         Ok(updated_user.into())
     }
@@ -374,9 +410,9 @@ impl UserRepository for PostgresUserRepository {
     }
 
     #[instrument(skip(self), err)]
-    async fn unlock_user(&self, user_id: Uuid) -> Result<(), CoreError> {
+    async fn unlock_user(&self, user: &Scoped<User>) -> Result<(), CoreError> {
         let user = crate::entity::users::Entity::find()
-            .filter(crate::entity::users::Column::Id.eq(user_id))
+            .filter(crate::entity::users::Column::Id.eq(user.get().id))
             .one(&self.db)
             .await
             .map_err(|e| {

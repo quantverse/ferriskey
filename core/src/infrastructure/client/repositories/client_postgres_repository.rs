@@ -1,6 +1,7 @@
 use crate::{
     domain::common::entities::app_errors::CoreError,
     entity::clients::{ActiveModel, Entity as ClientEntity},
+    infrastructure::common::is_unique_violation,
 };
 use chrono::Utc;
 use sea_orm::{
@@ -9,7 +10,7 @@ use sea_orm::{
 use tracing::instrument;
 use uuid::Uuid;
 
-use crate::domain::realm::entities::RealmId;
+use crate::domain::realm::entities::{RealmId, Scoped, Unscoped};
 use crate::domain::{
     client::{
         entities::{Client, redirect_uri::RedirectUri},
@@ -33,6 +34,7 @@ impl PostgresClientRepository {
 impl ClientRepository for PostgresClientRepository {
     async fn create_client(&self, data: CreateClientRequest) -> Result<Client, CoreError> {
         let (now, _) = generate_timestamp();
+        let client_id_for_error = data.client_id.clone();
 
         let payload = ActiveModel {
             id: Set(generate_uuid_v7()),
@@ -41,7 +43,7 @@ impl ClientRepository for PostgresClientRepository {
             client_id: Set(data.client_id),
             secret: Set(data.secret),
             enabled: Set(data.enabled),
-            protocol: Set(data.protocol),
+            protocol: Set(data.protocol.to_string()),
             public_client: Set(data.public_client),
             service_account_enabled: Set(data.service_account_enabled),
             direct_access_grants_enabled: Set(Some(data.direct_access_grants_enabled)),
@@ -55,11 +57,18 @@ impl ClientRepository for PostgresClientRepository {
             maintenance_reason: Set(None),
             maintenance_session_strategy: Set(None),
             require_pkce: Set(Some(data.require_pkce)),
+            token_exchange_enabled: Set(data.token_exchange_enabled),
+            backchannel_logout_uri: Set(None),
+            backchannel_logout_session_required: Set(true),
+            consent_required: Set(data.consent_required),
             created_at: Set(now.naive_utc()),
             updated_at: Set(now.naive_local()),
         };
 
         let client = payload.insert(&self.db).await.map_err(|e| {
+            if is_unique_violation(&e) {
+                return CoreError::ClientIdAlreadyExists(client_id_for_error);
+            }
             tracing::error!("Failed to insert client: {}", e);
             CoreError::InternalServerError
         })?;
@@ -74,7 +83,7 @@ impl ClientRepository for PostgresClientRepository {
         &self,
         client_id: String,
         realm_id: RealmId,
-    ) -> Result<Client, CoreError> {
+    ) -> Result<Unscoped<Client>, CoreError> {
         let client = ClientEntity::find()
             .filter(crate::entity::clients::Column::ClientId.eq(client_id))
             .filter(crate::entity::clients::Column::RealmId.eq::<Uuid>(realm_id.into()))
@@ -84,10 +93,14 @@ impl ClientRepository for PostgresClientRepository {
             .map(Client::from)
             .ok_or(CoreError::NotFound)?;
 
-        Ok(client)
+        Ok(Unscoped::new(client))
     }
 
-    async fn get_by_id(&self, realm_id: RealmId, id: uuid::Uuid) -> Result<Client, CoreError> {
+    async fn get_by_id(
+        &self,
+        realm_id: RealmId,
+        id: uuid::Uuid,
+    ) -> Result<Unscoped<Client>, CoreError> {
         let clients_model = ClientEntity::find()
             .filter(crate::entity::clients::Column::Id.eq(id))
             .filter(crate::entity::clients::Column::RealmId.eq(Uuid::from(realm_id)))
@@ -111,7 +124,7 @@ impl ClientRepository for PostgresClientRepository {
 
         client.redirect_uris = Some(redirect_uris);
 
-        Ok(client)
+        Ok(Unscoped::new(client))
     }
 
     async fn get_by_realm_id(&self, realm_id: RealmId) -> Result<Vec<Client>, CoreError> {
@@ -128,13 +141,12 @@ impl ClientRepository for PostgresClientRepository {
 
     async fn update_client(
         &self,
-        realm_id: RealmId,
-        client_id: Uuid,
+        client: &Scoped<Client>,
         data: UpdateClientRequest,
     ) -> Result<Client, CoreError> {
         let client = ClientEntity::find()
-            .filter(crate::entity::clients::Column::Id.eq(client_id))
-            .filter(crate::entity::clients::Column::RealmId.eq(Uuid::from(realm_id)))
+            .filter(crate::entity::clients::Column::Id.eq(client.get().id))
+            .filter(crate::entity::clients::Column::RealmId.eq(Uuid::from(client.get().realm_id)))
             .one(&self.db)
             .await
             .map_err(|_| CoreError::InternalServerError)?
@@ -171,6 +183,27 @@ impl ClientRepository for PostgresClientRepository {
             None => client.require_pkce,
         };
 
+        client.token_exchange_enabled = match data.token_exchange_enabled {
+            Some(enabled) => Set(enabled),
+            None => client.token_exchange_enabled,
+        };
+
+        client.backchannel_logout_uri = match data.backchannel_logout_uri {
+            Some(uri) => Set(uri),
+            None => client.backchannel_logout_uri,
+        };
+
+        client.backchannel_logout_session_required = match data.backchannel_logout_session_required
+        {
+            Some(required) => Set(required),
+            None => client.backchannel_logout_session_required,
+        };
+
+        client.consent_required = match data.consent_required {
+            Some(required) => Set(required),
+            None => client.consent_required,
+        };
+
         client.access_token_lifetime_secs = Set(data.access_token_lifetime.map(|v| v as i32));
         client.refresh_token_lifetime_secs = Set(data.refresh_token_lifetime.map(|v| v as i32));
         client.id_token_lifetime_secs = Set(data.id_token_lifetime.map(|v| v as i32));
@@ -199,10 +232,10 @@ impl ClientRepository for PostgresClientRepository {
         Ok(client.into())
     }
 
-    async fn delete_by_id(&self, realm_id: RealmId, id: Uuid) -> Result<(), CoreError> {
+    async fn delete_by_id(&self, client: &Scoped<Client>) -> Result<(), CoreError> {
         let result = ClientEntity::delete_many()
-            .filter(crate::entity::clients::Column::Id.eq(id))
-            .filter(crate::entity::clients::Column::RealmId.eq(Uuid::from(realm_id)))
+            .filter(crate::entity::clients::Column::Id.eq(client.get().id))
+            .filter(crate::entity::clients::Column::RealmId.eq(Uuid::from(client.get().realm_id)))
             .exec(&self.db)
             .await
             .map_err(|e| {

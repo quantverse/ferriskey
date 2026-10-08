@@ -41,6 +41,7 @@ jobs:
       DATABASE_NAME: ferriskey
       DATABASE_USER: ferriskey
       DATABASE_PASSWORD: ferriskey
+      DATABASE_URL: postgres://ferriskey:ferriskey@localhost:5432/ferriskey
 
     steps:
       - name: checkout
@@ -66,6 +67,12 @@ jobs:
       - name: run saml xmlsec1 interop tests
         run: cargo test -p ferriskey-saml --test xmlsec_interop -- --ignored
 
+      # End-to-end SAML IdP coverage (#1269): descriptor, SP-initiated SSO over
+      # both bindings with the signed response verified by xmlsec1, and the
+      # rejection cases (unknown SP, ACS mismatch, replayed authorization code).
+      - name: run saml integration tests
+        run: cargo test -p ferriskey-api --test saml_test -- --ignored
+
       - name: run device flow integration tests
         run: cargo test -p ferriskey-api --test device_flow_test -- --ignored
 
@@ -87,8 +94,22 @@ jobs:
       - name: run account lockout integration tests
         run: cargo test -p ferriskey-api --test account_lockout_test -- --ignored
 
+      - name: run password import integration tests
+        run: cargo test -p ferriskey-api --test password_import_test -- --ignored
+
+      - name: run caller-supplied user id integration tests
+        run: cargo test -p ferriskey-api --test supplied_user_id_test -- --ignored
+
       - name: run session management integration tests
         run: cargo test -p ferriskey-api --test session_management_test -- --ignored
+
+      # Cross-application single sign-on (#1329): one login reaching a second,
+      # confidential client without the login form, plus the refusals (expired or
+      # unknown session, disabled account) and the shape of the FERRISKEY_SSO
+      # cookie. The suite shares one `admin` user and toggles its `enabled` flag,
+      # so the tests take an in-file lock rather than relying on --test-threads=1.
+      - name: run SSO session integration tests
+        run: cargo test -p ferriskey-api --test sso_session_test -- --ignored
 
       - name: run redirect_uri validation integration tests
         run: cargo test -p ferriskey-api --test redirect_uri_validation_test -- --ignored
@@ -99,6 +120,9 @@ jobs:
       - name: run token revocation integration tests
         run: cargo test -p ferriskey-api --test token_revocation_test -- --ignored
 
+      - name: run realm lifecycle integration tests
+        run: cargo test -p ferriskey-api --test realm_lifecycle_test -- --ignored
+
       - name: run cross-realm user isolation integration tests
         run: cargo test -p ferriskey-api --test user_cross_realm_test -- --ignored
 
@@ -108,5 +132,94 @@ jobs:
       - name: run cross-realm organization isolation integration tests
         run: cargo test -p ferriskey-api --test organization_cross_realm_test -- --ignored
 
+      - name: run cross-realm credential isolation integration tests
+        run: cargo test -p ferriskey-api --test credential_cross_realm_test -- --ignored
+
+      - name: run cross-realm role isolation integration tests
+        run: cargo test -p ferriskey-api --test role_cross_realm_test -- --ignored
+
+      - name: run cross-realm auth session isolation integration tests
+        run: cargo test -p ferriskey-api --test auth_session_cross_realm_test -- --ignored
+
+      - name: run cross-realm maintenance whitelist isolation integration tests
+        run: cargo test -p ferriskey-api --test maintenance_cross_realm_test -- --ignored
+
+      - name: run cross-realm abyss isolation integration tests
+        run: cargo test -p ferriskey-api --test abyss_cross_realm_test -- --ignored
+
+      - name: run cross-realm session and compass isolation integration tests
+        run: cargo test -p ferriskey-api --test session_cross_realm_test -- --ignored
+
+      - name: run cross-realm client scope isolation integration tests
+        run: cargo test -p ferriskey-api --test scope_cross_realm_test -- --ignored
+
+      - name: run cross-realm observability isolation integration tests
+        run: cargo test -p ferriskey-api --test observability_cross_realm_test -- --ignored
+
+      - name: run cross-realm saml isolation integration tests
+        run: cargo test -p ferriskey-api --test saml_cross_realm_test -- --ignored
+
+      - name: run cross-realm trident isolation integration tests
+        run: cargo test -p ferriskey-api --test trident_cross_realm_test -- --ignored
+
+      - name: run cross-realm realm administration isolation integration tests
+        run: cargo test -p ferriskey-api --test realm_cross_realm_test -- --ignored
+
+      - name: run cross-realm openid connect isolation integration tests
+        run: cargo test -p ferriskey-api --test oidc_cross_realm_test -- --ignored
+
+      - name: run seawatch integration tests
+        run: cargo test -p ferriskey-api --test seawatch_test -- --ignored
+
+      - name: run consent integration tests
+        run: cargo test -p ferriskey-api --test consent_test -- --ignored
+
+      # Every test in this file shares one realm, and the CORS origin cache
+      # (RealmOriginCache) is keyed by realm name alone — running them
+      # concurrently races on that shared cache entry. --test-threads=1
+      # keeps the shared-fixture design without touching the cache's
+      # granularity for a test-only concern.
       - name: run web origin integration tests
-        run: cargo test -p ferriskey-api --test web_origin_test -- --ignored
+        run: cargo test -p ferriskey-api --test web_origin_test -- --ignored --test-threads=1
+
+      # Self-service account profile (#995, first iteration): GET/PUT /me
+      # and the realm-gated username edit.
+      - name: run self-service account profile integration tests
+        run: cargo test -p ferriskey-api --test me_profile_test -- --ignored
+
+      # Self-service account security (#1482): elevation is required and is
+      # bound to one account and one session, a refused re-authentication mints
+      # nothing, a password change rotates the credential without signing the
+      # caller out, and the credential listing hands back no secret material.
+      - name: run self-service account security integration tests
+        run: cargo test -p ferriskey-api --test account_security_test -- --ignored
+
+      # First ferriskey-core suite wired into CI. The repository tests of `core`
+      # read DATABASE_URL (a different dialect from the DATABASE_* variables the
+      # api suites use) and create one throwaway schema per test, so they are
+      # safe to run against the same service. Filtered by module name because
+      # these are in-source unit tests, not a `--test <name>` target.
+      - name: run webhook delivery outbox repository tests
+        run: cargo test -p ferriskey-core webhook_delivery -- --ignored
+
+      # Delivery history and manual replay (#1336): realm/webhook scoping,
+      # page-size rejection, replay conflict on a non-terminal delivery.
+      - name: run webhook delivery API integration tests
+        run: cargo test -p ferriskey-api --test webhook_delivery_api_test -- --ignored
+
+      # Token exchange delegation policies (#1064): admin CRUD, conflicts and
+      # realm isolation.
+      - name: run token exchange policy integration tests
+        run: cargo test -p ferriskey-api --test token_exchange_policy_test -- --ignored
+
+      # RFC 8693 exchange (#1053, #1062, #1054): the exchange rules against the
+      # real key store and access token table, and the token endpoint wire
+      # format (200 body, 401 challenge, RFC 6749 error codes).
+      - name: run token exchange integration tests
+        run: cargo test -p ferriskey-api --test token_exchange_test -- --ignored
+
+      # OIDC Back-Channel Logout (#1400): a loopback relying party receives a
+      # logout token, verified against the realm JWKS, for every way a
+      # session ends.
+      - name: run back-channel logout integration tests
+        run: cargo test -p ferriskey-api --test backchannel_logout_test -- --ignored

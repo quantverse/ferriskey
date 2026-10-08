@@ -1,5 +1,7 @@
 use std::{collections::HashSet, sync::Arc};
 
+use crate::domain::authentication::entities::AuthProtocol;
+
 use crate::domain::{
     abyss::identity_provider::{
         IdentityProviderRepository, entities::IdentityProviderPresentation,
@@ -17,7 +19,7 @@ use crate::domain::{
         policies::{FerriskeyPolicy, ensure_policy},
     },
     realm::{
-        entities::{Realm, RealmId, RealmLoginSetting, RealmSetting, SmtpConfig},
+        entities::{Realm, RealmId, RealmLoginSetting, RealmScope, RealmSetting, SmtpConfig},
         ports::{
             CreateRealmInput, CreateRealmWithUserInput, DeleteRealmInput, DeleteSmtpConfigInput,
             GetRealmInput, GetRealmSettingInput, GetSmtpConfigInput, MailService, RealmPolicy,
@@ -323,15 +325,13 @@ where
         identity: Identity,
         input: CreateRealmInput,
     ) -> Result<Realm, CoreError> {
-        let realm_master = self
-            .realm_repository
-            .get_by_name("master")
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let master_scope = RealmScope::resolve(self.realm_repository.as_ref(), "master").await?;
 
-        let realm_master_id = realm_master.id;
+        let realm_master_id = master_scope.id();
         ensure_policy(
-            self.policy.can_create_realm(&identity, &realm_master).await,
+            self.policy
+                .can_create_realm(&identity, master_scope.realm())
+                .await,
             "insufficient permissions",
         )?;
 
@@ -344,6 +344,29 @@ where
             .await?;
 
         let name = format!("{}-realm", realm.name);
+
+        // Deployments that ran an older version may still hold a mirror client
+        // orphaned by a realm deletion. Its name is reserved for the realm we
+        // have just created, so the leftover is removed rather than reused: the
+        // stale `{realm}-realm` role would otherwise hand its old holders
+        // ManageRealm over a realm they were never granted.
+        match self
+            .client_repository
+            .get_by_client_id(name.clone(), realm_master_id)
+            .await
+        {
+            Ok(orphan) => {
+                let orphan = orphan.in_realm(&master_scope)?;
+                tracing::warn!(
+                    client.id = %orphan.get().id,
+                    client.client_id = %name,
+                    "removing a mirror client orphaned by an earlier realm deletion"
+                );
+                self.client_repository.delete_by_id(&orphan).await?;
+            }
+            Err(CoreError::NotFound) => {}
+            Err(e) => return Err(e),
+        }
 
         let client = self
             .client_repository
@@ -366,7 +389,11 @@ where
 
         let user = match identity {
             Identity::User(u) => u,
-            Identity::Client(c) => self.user_repository.get_by_client_id(c.id).await?,
+            Identity::Client(c) => self
+                .user_repository
+                .get_by_client_id(c.id)
+                .await?
+                .across_realms(),
         };
 
         self.user_role_repository
@@ -383,14 +410,16 @@ where
                 // device code grant is enabled by default — that's its whole
                 // purpose. Other seeded clients keep it off.
                 oauth_device_code_grant_enabled: true,
+                token_exchange_enabled: false,
                 enabled: true,
                 name: "admin-cli".to_string(),
-                protocol: "openid-connect".to_string(),
+                protocol: AuthProtocol::OpenIdConnect,
                 public_client: true,
                 realm_id: realm.id,
                 secret: None,
                 service_account_enabled: false,
                 require_pkce: false,
+                consent_required: false,
             })
             .await?;
 
@@ -401,14 +430,16 @@ where
                 client_type: ClientType::Public,
                 direct_access_grants_enabled: false,
                 oauth_device_code_grant_enabled: false,
+                token_exchange_enabled: false,
                 enabled: true,
                 name: "ferriskey-account".to_string(),
-                protocol: "openid-connect".to_string(),
+                protocol: AuthProtocol::OpenIdConnect,
                 public_client: true,
                 realm_id: realm.id,
                 secret: None,
                 service_account_enabled: false,
                 require_pkce: false,
+                consent_required: false,
             })
             .await?;
 
@@ -428,14 +459,16 @@ where
                 client_type: ClientType::Public,
                 direct_access_grants_enabled: false,
                 oauth_device_code_grant_enabled: false,
+                token_exchange_enabled: false,
                 enabled: true,
                 name: "security-admin-console".to_string(),
-                protocol: "openid-connect".to_string(),
+                protocol: AuthProtocol::OpenIdConnect,
                 public_client: true,
                 realm_id: realm.id,
                 secret: None,
                 service_account_enabled: false,
                 require_pkce: true,
+                consent_required: false,
             })
             .await?;
 
@@ -464,7 +497,8 @@ where
         let account_client = self
             .client_repository
             .get_by_client_id("ferriskey-account".to_string(), realm_id)
-            .await?;
+            .await?
+            .across_realms();
 
         self.seed_default_scopes_for_client(realm_id, account_client.id)
             .await
@@ -495,31 +529,33 @@ where
 
         let user = match identity {
             Identity::User(user) => user,
-            Identity::Client(client) => self.user_repository.get_by_client_id(client.id).await?,
+            Identity::Client(client) => self
+                .user_repository
+                .get_by_client_id(client.id)
+                .await?
+                .across_realms(),
         };
 
-        let realm_master = self
-            .realm_repository
-            .get_by_name("master")
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let master_scope = RealmScope::resolve(self.realm_repository.as_ref(), "master").await?;
 
         let client_id = format!("{}-realm", input.realm_name);
         let client = self
             .client_repository
             .create_client(CreateClientRequest {
-                realm_id: realm_master.id,
+                realm_id: master_scope.id(),
                 name: client_id.clone(),
                 client_id,
                 secret: Some(generate_random_string()),
                 enabled: true,
-                protocol: "openid-connect".to_string(),
+                protocol: AuthProtocol::OpenIdConnect,
                 public_client: true,
                 service_account_enabled: false,
                 direct_access_grants_enabled: false,
                 oauth_device_code_grant_enabled: false,
+                token_exchange_enabled: false,
                 client_type: ClientType::Public,
                 require_pkce: false,
+                consent_required: false,
             })
             .await?;
 
@@ -537,7 +573,7 @@ where
                 client_id: Some(client.id),
                 name: format!("{}-realm-admin", input.realm_name),
                 permissions,
-                realm_id: realm_master.id,
+                realm_id: master_scope.id(),
                 description: Some(format!("role for manage realm {}", input.realm_name)),
             })
             .await?;
@@ -562,17 +598,10 @@ where
         identity: Identity,
         input: DeleteRealmInput,
     ) -> Result<(), CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let realm = scope.realm().clone();
 
-        let realm_master = self
-            .realm_repository
-            .get_by_name("master")
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let master_scope = RealmScope::resolve(self.realm_repository.as_ref(), "master").await?;
 
         if !realm.can_delete() {
             return Err(CoreError::CannotDeleteMasterRealm);
@@ -585,24 +614,47 @@ where
             "insufficient permissions",
         )?;
 
-        let client = self
+        // The mirror client lives in `master`, not in the realm being removed,
+        // so it has to be deleted under master's id. Deleting it first keeps a
+        // failure here from leaving a realm that is already gone: the two
+        // deletions span separate repositories, so this ordering is the only
+        // atomicity available.
+        //
+        // A missing mirror client is tolerated rather than propagated: the
+        // realm row is what the caller asked to remove, and answering an error
+        // for a client that is already absent would report a failure for an
+        // operation that has nothing left to do.
+        match self
             .client_repository
-            .get_by_client_id(format!("{}-realm", input.realm_name), realm_master.id)
-            .await?;
+            .get_by_client_id(format!("{}-realm", input.realm_name), master_scope.id())
+            .await
+        {
+            Ok(client) => {
+                // Deleting the client cascades to the `{realm}-realm` role and
+                // to every assignment of it.
+                let client = client.in_realm(&master_scope)?;
+                self.client_repository.delete_by_id(&client).await?;
+            }
+            Err(CoreError::NotFound) => {
+                tracing::warn!(
+                    realm.name = %input.realm_name,
+                    "no mirror client found in master for the realm being deleted"
+                );
+            }
+            Err(e) => return Err(e),
+        }
 
+        // Notify before the realm disappears: the subscriptions being notified
+        // belong to it.
         self.webhook_repository
             .notify(
                 realm_id,
-                WebhookPayload::new(WebhookTrigger::RealmCreated, realm_id.into(), Some(realm)),
+                WebhookPayload::new(WebhookTrigger::RealmDeleted, realm_id.into(), Some(realm)),
             )
             .await?;
 
         self.realm_repository
             .delete_by_name(&input.realm_name)
-            .await?;
-
-        self.client_repository
-            .delete_by_id(realm_id, client.id)
             .await?;
 
         Ok(())
@@ -621,15 +673,13 @@ where
         identity: Identity,
         input: GetRealmInput,
     ) -> Result<Realm, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name)
             .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+            .map_err(|_| CoreError::InvalidRealm)?;
+        let realm = scope.realm().clone();
 
         ensure_policy(
-            self.policy.can_view_realm(&identity, &realm).await,
+            self.policy.can_view_realm(&identity, scope.realm()).await,
             "insufficient permissions",
         )?;
 
@@ -649,22 +699,16 @@ where
         identity: Identity,
         input: GetRealmSettingInput,
     ) -> Result<RealmSetting, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
-
-        let realm_id = realm.id;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
 
         ensure_policy(
-            self.policy.can_view_realm(&identity, &realm).await,
+            self.policy.can_view_realm(&identity, scope.realm()).await,
             "insufficient permissions",
         )?;
 
         let realm_setting = self
             .realm_repository
-            .get_realm_settings(realm_id)
+            .get_realm_settings(scope.id())
             .await?
             .ok_or(CoreError::NotFound)?;
 
@@ -681,14 +725,15 @@ where
     async fn get_realms_by_user(&self, identity: Identity) -> Result<Vec<Realm>, CoreError> {
         let user = match identity {
             Identity::User(user) => user,
-            Identity::Client(client) => self.user_repository.get_by_client_id(client.id).await?,
+            Identity::Client(client) => self
+                .user_repository
+                .get_by_client_id(client.id)
+                .await?
+                .across_realms(),
         };
 
         let realm = user.realm.clone().ok_or(CoreError::InternalServerError)?;
-        self.realm_repository
-            .get_by_name(&realm.name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        RealmScope::resolve(self.realm_repository.as_ref(), &realm.name).await?;
 
         let user_roles = self.user_role_repository.get_user_roles(user.id).await?;
 
@@ -746,15 +791,11 @@ where
         identity: Identity,
         input: UpdateRealmInput,
     ) -> Result<Realm, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
 
-        let realm_id = realm.id;
+        let realm_id = scope.id();
         ensure_policy(
-            self.policy.can_update_realm(&identity, &realm).await,
+            self.policy.can_update_realm(&identity, scope.realm()).await,
             "insufficient permissions",
         )?;
 
@@ -790,21 +831,18 @@ where
         identity: Identity,
         input: UpdateRealmSettingInput,
     ) -> Result<Realm, CoreError> {
-        let mut realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
+        let mut realm = scope.realm().clone();
 
         ensure_policy(
-            self.policy.can_update_realm(&identity, &realm).await,
+            self.policy.can_update_realm(&identity, scope.realm()).await,
             "insufficient permissions",
         )?;
 
         let realm_setting = self
             .realm_repository
             .update_realm_setting(
-                realm.id,
+                scope.id(),
                 input.algorithm,
                 input.user_registration_enabled,
                 input.forgot_password_enabled,
@@ -825,9 +863,15 @@ where
                 input.lockout_threshold,
                 input.lockout_duration_seconds,
                 input.login_aliases,
+                input.locales,
                 input.seawatch_pii_mode,
                 input.seawatch_pseudo_key,
                 input.require_mfa,
+                input.edit_username_enabled,
+                input.webhook_retry_max_attempts,
+                input.webhook_retry_base_delay_ms,
+                input.webhook_retry_max_delay_ms,
+                input.webhook_retry_max_total_delay_ms,
             )
             .await?;
 
@@ -854,22 +898,19 @@ where
         )
     )]
     async fn get_login_settings(&self, realm_name: String) -> Result<RealmLoginSetting, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &realm_name).await?;
+        let realm = scope.realm().clone();
 
         let mut settings: RealmLoginSetting = self
             .realm_repository
-            .get_realm_settings(realm.id)
+            .get_realm_settings(scope.id())
             .await?
             .ok_or(CoreError::NotFound)?
             .into();
 
         let idp: Vec<IdentityProviderPresentation> = self
             .identity_provider_repository
-            .list_identity_providers_by_realm(realm.id, Some(true))
+            .list_identity_providers_by_realm(scope.id(), Some(true))
             .await?
             .into_iter()
             .map(|i| IdentityProviderPresentation::new(i, &realm.name))
@@ -939,19 +980,15 @@ where
         identity: Identity,
         input: GetSmtpConfigInput,
     ) -> Result<SmtpConfig, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
 
         ensure_policy(
-            self.policy.can_view_realm(&identity, &realm).await,
+            self.policy.can_view_realm(&identity, scope.realm()).await,
             "view realm settings",
         )?;
 
         self.smtp_config_repository
-            .get_by_realm_id(realm.id)
+            .get_by_realm_id(scope.id())
             .await?
             .ok_or(CoreError::NotFound)
     }
@@ -969,20 +1006,16 @@ where
         identity: Identity,
         input: UpsertSmtpConfigInput,
     ) -> Result<SmtpConfig, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
 
         ensure_policy(
-            self.policy.can_update_realm(&identity, &realm).await,
+            self.policy.can_update_realm(&identity, scope.realm()).await,
             "update realm SMTP config",
         )?;
 
         let config = SmtpConfig {
             id: uuid::Uuid::nil(),
-            realm_id: realm.id.into(),
+            realm_id: scope.id().into(),
             host: input.host,
             port: input.port,
             username: input.username,
@@ -1013,19 +1046,15 @@ where
         identity: Identity,
         input: DeleteSmtpConfigInput,
     ) -> Result<(), CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
 
         ensure_policy(
-            self.policy.can_update_realm(&identity, &realm).await,
+            self.policy.can_update_realm(&identity, scope.realm()).await,
             "delete realm SMTP config",
         )?;
 
         self.smtp_config_repository
-            .delete_by_realm_id(realm.id)
+            .delete_by_realm_id(scope.id())
             .await
     }
 }
@@ -1036,6 +1065,7 @@ mod tests {
     use crate::domain::aegis::mocks::{
         MockClientScopeMappingRepository, MockClientScopeRepository, MockProtocolMapperRepository,
     };
+    use crate::domain::realm::entities::Unscoped;
     use crate::domain::{
         abyss::identity_provider::ports::MockIdentityProviderRepository,
         client::ports::{MockClientRepository, MockRedirectUriRepository},
@@ -1158,6 +1188,27 @@ mod tests {
             self
         }
 
+        /// The common case: no leftover mirror client sits in master under the
+        /// name the realm being created is about to claim.
+        fn with_no_orphan_mirror_client(mut self) -> Self {
+            Arc::get_mut(&mut self.client_repo)
+                .unwrap()
+                .expect_get_by_client_id()
+                .withf(|client_id, _| client_id.ends_with("-realm") && client_id != "master-realm")
+                .times(1)
+                .return_once(|_, _| Box::pin(async move { Err(CoreError::NotFound) }));
+            self
+        }
+
+        fn with_master_mirror_client_lookup(mut self) -> Self {
+            Arc::get_mut(&mut self.client_repo)
+                .unwrap()
+                .expect_get_by_client_id()
+                .withf(|client_id, _| client_id == "master-realm")
+                .returning(|_, _| Box::pin(async move { Err(CoreError::NotFound) }));
+            self
+        }
+
         fn with_system_client(mut self, master_realm_id: RealmId) -> Self {
             Arc::get_mut(&mut self.client_repo)
                 .unwrap()
@@ -1176,7 +1227,7 @@ mod tests {
                                 client_id: req.client_id.clone(),
                                 secret: req.secret.clone(),
                                 enabled: true,
-                                protocol: "openid-connect".to_string(),
+                                protocol: req.protocol,
                                 public_client: req.public_client,
                                 service_account_enabled: req.service_account_enabled,
                                 client_type: req.client_type.clone(),
@@ -1186,6 +1237,7 @@ mod tests {
                                 oauth_device_code_grant_enabled: Some(
                                     req.oauth_device_code_grant_enabled,
                                 ),
+                                token_exchange_enabled: Some(req.token_exchange_enabled),
                                 access_token_lifetime: None,
                                 refresh_token_lifetime: None,
                                 id_token_lifetime: None,
@@ -1212,12 +1264,13 @@ mod tests {
                                 client_id: req.client_id.clone(),
                                 secret: None,
                                 enabled: true,
-                                protocol: "openid-connect".to_string(),
+                                protocol: req.protocol,
                                 public_client: true,
                                 service_account_enabled: false,
                                 client_type: req.client_type.clone(),
                                 direct_access_grants_enabled: Some(true),
                                 oauth_device_code_grant_enabled: Some(true),
+                                token_exchange_enabled: None,
                                 access_token_lifetime: None,
                                 refresh_token_lifetime: None,
                                 id_token_lifetime: None,
@@ -1246,12 +1299,13 @@ mod tests {
                                 client_id: req.client_id.clone(),
                                 secret: None,
                                 enabled: true,
-                                protocol: "openid-connect".to_string(),
+                                protocol: req.protocol,
                                 public_client: true,
                                 service_account_enabled: false,
                                 client_type: req.client_type.clone(),
                                 direct_access_grants_enabled: Some(false),
                                 oauth_device_code_grant_enabled: Some(false),
+                                token_exchange_enabled: None,
                                 access_token_lifetime: None,
                                 refresh_token_lifetime: None,
                                 id_token_lifetime: None,
@@ -1280,12 +1334,13 @@ mod tests {
                                 client_id: req.client_id.clone(),
                                 secret: req.secret.clone(),
                                 enabled: true,
-                                protocol: "openid-connect".to_string(),
+                                protocol: req.protocol,
                                 public_client: false,
                                 service_account_enabled: false,
                                 client_type: req.client_type.clone(),
                                 direct_access_grants_enabled: Some(false),
                                 oauth_device_code_grant_enabled: Some(false),
+                                token_exchange_enabled: None,
                                 access_token_lifetime: None,
                                 refresh_token_lifetime: None,
                                 id_token_lifetime: None,
@@ -1361,6 +1416,9 @@ mod tests {
         }
 
         fn with_seed_default_scopes(mut self, new_realm_id: RealmId) -> Self {
+            // 8 scopes (openid, profile, email, roles, organization,
+            // offline_access, phone, address), 10 mappers across them —
+            // see `seed_default_scopes_for_client`.
             Arc::get_mut(&mut self.client_scope_repo)
                 .unwrap()
                 .expect_create()
@@ -1449,6 +1507,99 @@ mod tests {
             self
         }
 
+        fn with_realm_by_name(mut self, realm: Realm) -> Self {
+            let name = realm.name.clone();
+            Arc::get_mut(&mut self.realm_repo)
+                .unwrap()
+                .expect_get_by_name()
+                .with(mockall::predicate::eq(name))
+                .times(1)
+                .return_once(move |_| Box::pin(async move { Ok(Some(realm)) }));
+            self
+        }
+
+        /// The mirror client of `realm_name`, as it actually lives: in master.
+        fn with_mirror_client_in_master(
+            mut self,
+            realm_name: &str,
+            master_realm_id: RealmId,
+            client_id: uuid::Uuid,
+        ) -> Self {
+            let expected = format!("{realm_name}-realm");
+            Arc::get_mut(&mut self.client_repo)
+                .unwrap()
+                .expect_get_by_client_id()
+                // Looked up twice: once by the cross-realm policy to derive the
+                // caller's permissions, once by the deletion itself.
+                .withf(move |name, realm_id| *name == expected && *realm_id == master_realm_id)
+                .times(2)
+                .returning(move |name, realm_id| {
+                    Box::pin(async move {
+                        let mut client = crate::domain::client::entities::Client::new(
+                            crate::domain::client::entities::ClientConfig {
+                                realm_id,
+                                name: name.clone(),
+                                client_id: name,
+                                secret: None,
+                                enabled: true,
+                                protocol: AuthProtocol::OpenIdConnect,
+                                public_client: false,
+                                service_account_enabled: false,
+                                client_type: ClientType::Confidential,
+                                direct_access_grants_enabled: Some(false),
+                                oauth_device_code_grant_enabled: Some(false),
+                                token_exchange_enabled: None,
+                                access_token_lifetime: None,
+                                refresh_token_lifetime: None,
+                                id_token_lifetime: None,
+                                temporary_token_lifetime: None,
+                            },
+                        );
+                        client.id = client_id;
+                        Ok(Unscoped::new(client))
+                    })
+                });
+            self
+        }
+
+        /// Asserts the scope the mirror client is deleted under — the whole
+        /// point of the fix, since deleting it under the removed realm's id
+        /// matches no row and leaves the client orphaned in master.
+        fn expect_client_deleted_in(mut self, realm_id: RealmId, client_id: uuid::Uuid) -> Self {
+            Arc::get_mut(&mut self.client_repo)
+                .unwrap()
+                .expect_delete_by_id()
+                .withf(move |client| {
+                    client.get().realm_id == realm_id && client.get().id == client_id
+                })
+                .times(1)
+                .return_once(|_| Box::pin(async move { Ok(()) }));
+            self
+        }
+
+        fn expect_realm_deleted(mut self, realm_name: &str) -> Self {
+            let name = realm_name.to_string();
+            Arc::get_mut(&mut self.realm_repo)
+                .unwrap()
+                .expect_delete_by_name()
+                .with(mockall::predicate::eq(name))
+                .times(1)
+                .return_once(|_| Box::pin(async move { Ok(()) }));
+            self
+        }
+
+        fn expect_realm_deleted_webhook(mut self) -> Self {
+            Arc::get_mut(&mut self.webhook_repo)
+                .unwrap()
+                .expect_notify::<Realm>()
+                .withf(|_, payload: &WebhookPayload<Realm>| {
+                    payload.event == WebhookTrigger::RealmDeleted
+                })
+                .times(1)
+                .return_once(|_, _: WebhookPayload<Realm>| Box::pin(async move { Ok(()) }));
+            self
+        }
+
         fn build(
             self,
         ) -> RealmServiceImpl<
@@ -1485,6 +1636,68 @@ mod tests {
                 "https://console.example".to_string(),
             )
         }
+    }
+
+    /// Builds the identity and the ManageRealm role a deletion test needs.
+    ///
+    /// Deleting another realm is cross-realm access, so the policy reads the
+    /// permissions off the roles attached to that realm's mirror client — hence
+    /// `mirror_client_id` on the role.
+    fn deletion_actor(
+        master_realm: &Realm,
+        mirror_client_id: uuid::Uuid,
+    ) -> (Identity, crate::domain::role::entities::Role) {
+        let identity = create_test_user_identity_with_realm(master_realm);
+        let role = crate::domain::role::entities::Role {
+            id: uuid::Uuid::new_v4(),
+            name: "admin".to_string(),
+            description: None,
+            permissions: vec![
+                crate::domain::role::entities::permission::Permissions::ManageRealm.name(),
+            ],
+            realm_id: master_realm.id,
+            client_id: Some(mirror_client_id),
+            client: None,
+            require_mfa: false,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        (identity, role)
+    }
+
+    #[tokio::test]
+    async fn deleting_a_realm_deletes_its_mirror_client_from_master() -> Result<(), CoreError> {
+        let master_realm = create_test_realm_with_name("master");
+        let realm = create_test_realm_with_name("zukquote");
+        let mirror_client_id = uuid::Uuid::new_v4();
+        let (identity, admin_role) = deletion_actor(&master_realm, mirror_client_id);
+        let user_id = match &identity {
+            Identity::User(u) => u.id,
+            _ => panic!("expected a user identity"),
+        };
+
+        let service = RealmServiceTestBuilder::new()
+            .with_realm_by_name(realm.clone())
+            .with_master_realm(master_realm.clone())
+            .with_user_permissions(user_id, vec![admin_role])
+            .with_mirror_client_in_master("zukquote", master_realm.id, mirror_client_id)
+            // The scope under test: master's id, not the id of the realm going away.
+            .expect_client_deleted_in(master_realm.id, mirror_client_id)
+            .expect_realm_deleted_webhook()
+            .expect_realm_deleted("zukquote")
+            .build();
+
+        let outcome = service
+            .delete_realm(
+                identity,
+                DeleteRealmInput {
+                    realm_name: "zukquote".to_string(),
+                },
+            )
+            .await;
+        assert!(outcome.is_ok(), "deletion failed: {outcome:?}");
+
+        Ok(())
     }
 
     #[tokio::test]
@@ -1528,6 +1741,8 @@ mod tests {
             .with_user_permissions(user.id, vec![admin_role])
             .with_created_realm("realm_test".to_string(), new_realm.clone())
             .with_realm_settings(new_realm.id)
+            .with_no_orphan_mirror_client()
+            .with_master_mirror_client_lookup()
             .with_system_client(master_realm.id)
             .with_role_creation(master_realm.id)
             .with_assign_role()
@@ -1586,6 +1801,8 @@ mod tests {
             .with_user_permissions(user.id, vec![admin_role])
             .with_created_realm("realm_test".to_string(), new_realm.clone())
             .with_realm_settings(new_realm.id)
+            .with_no_orphan_mirror_client()
+            .with_master_mirror_client_lookup()
             .with_system_client(master_realm.id)
             .with_role_creation(master_realm.id)
             .with_assign_role()

@@ -1,9 +1,11 @@
 import { useDevicePreview, useDeviceVerify } from '@/api/device.api'
 import { Form } from '@/components/ui/form'
 import { useAuth } from '@/hooks/use-auth'
+import { apiErrorMessage } from '@/lib/api-error'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useForm, useWatch } from 'react-hook-form'
+import { useTranslation } from 'react-i18next'
 import { useLocation, useNavigate, useParams } from 'react-router'
 import { toast } from 'sonner'
 import {
@@ -12,6 +14,7 @@ import {
   USER_CODE_CHARSET,
 } from '../schemas/device-verify.schema'
 import PageDeviceVerify, { DeviceVerifyStatus } from '../ui/page-device-verify'
+import { AUTH_NAMESPACE, type DeviceAction } from '../constants'
 
 // sessionStorage key used to bring the user back to this page after the
 // OAuth login round-trip. We can't rely on the OAuth `state` channel because
@@ -33,6 +36,7 @@ function normalisePrefill(raw: string | null): string {
 
 export default function PageDeviceVerifyFeature() {
   const { realm_name } = useParams()
+  const { t } = useTranslation(AUTH_NAMESPACE)
   const realm = realm_name ?? 'master'
   const location = useLocation()
   const navigate = useNavigate()
@@ -57,7 +61,7 @@ export default function PageDeviceVerifyFeature() {
 
   const [status, setStatus] = useState<DeviceVerifyStatus>('idle')
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
-  const [pendingAction, setPendingAction] = useState<'approve' | 'deny' | null>(null)
+  const [pendingAction, setPendingAction] = useState<DeviceAction | null>(null)
   const redirectingToLogin = useRef(false)
 
   const { mutateAsync: verifyDevice } = useDeviceVerify()
@@ -70,10 +74,7 @@ export default function PageDeviceVerifyFeature() {
     enabled: isAuthenticated && normalisedCode.length > 0 && status === 'idle',
   })
 
-  const onSubmit = async (
-    values: DeviceVerifySchema,
-    action: 'approve' | 'deny'
-  ) => {
+  const onSubmit = async (values: DeviceVerifySchema, action: DeviceAction) => {
     setStatus('submitting')
     setErrorMessage(null)
     setPendingAction(action)
@@ -84,15 +85,11 @@ export default function PageDeviceVerifyFeature() {
       })
       setStatus(response.status === 'denied' ? 'denied' : 'approved')
     } catch (err) {
-      const error = err as {
-        status?: number
-        data?: { error?: string; error_description?: string; redirect_uri?: string }
-        message?: string
-      }
+      const error = err as { status?: number; data?: { redirect_uri?: string } }
 
       // 401: backend tells us to log in and come back. Stash the current URL
       // so the callback returns the user to the verification page once the
-      // identity cookie is set, then kick off the standard OAuth login flow.
+      // SSO session cookie is set, then kick off the standard OAuth login flow.
       if (error.status === 401) {
         if (redirectingToLogin.current) return
         redirectingToLogin.current = true
@@ -109,10 +106,7 @@ export default function PageDeviceVerifyFeature() {
         return
       }
 
-      const description =
-        error.data?.error_description ??
-        error.message ??
-        'Unable to verify this code. Please try again.'
+      const description = apiErrorMessage(err, t('device.failed'))
 
       // 400 from the backend means unknown / expired / already-used code;
       // surface inline so the user can re-enter without losing the page.

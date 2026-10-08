@@ -86,6 +86,7 @@ mod tests {
             .expect("run migrations");
 
         let service = create_service(FerriskeyConfig {
+            webhook_allow_private_endpoints: false,
             webapp_url: "http://localhost:5555".to_string(),
             database: DatabaseConfig {
                 host: db_host,
@@ -259,5 +260,27 @@ mod tests {
         let methods: Vec<&str> = methods.iter().filter_map(|v| v.as_str()).collect();
         assert!(methods.contains(&"client_secret_basic"));
         assert!(methods.contains(&"client_secret_post"));
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn discovery_advertises_code_challenge_methods() {
+        let ctx = setup().await;
+
+        let response = ctx
+            .server
+            .get(&format!(
+                "/realms/{}/.well-known/openid-configuration",
+                ctx.realm_name
+            ))
+            .await;
+
+        assert_eq!(response.status_code(), 200);
+        let body: Value = response.json();
+        let methods = body["code_challenge_methods_supported"]
+            .as_array()
+            .expect("code_challenge_methods_supported is an array");
+        let methods: Vec<&str> = methods.iter().filter_map(|v| v.as_str()).collect();
+        assert!(methods.contains(&"S256"));
     }
 }

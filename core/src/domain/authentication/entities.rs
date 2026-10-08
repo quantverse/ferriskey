@@ -8,7 +8,7 @@ use webauthn_rs::prelude::{
 use crate::domain::authentication::value_objects::CodeChallengeMethod;
 use crate::domain::common::generate_timestamp;
 use crate::domain::jwt::entities::JwtClaim;
-use crate::domain::realm::entities::RealmId;
+use crate::domain::realm::entities::{RealmId, RealmOwned};
 
 // Plain OAuth2/OIDC domain types now live in the shared `ferriskey-domain` crate.
 // Re-exported here so existing `crate::domain::authentication::entities::*` call sites keep
@@ -19,7 +19,7 @@ pub use ferriskey_domain::authentication::entities::{
     AuthCompletion, AuthInput, AuthProtocol, AuthenticateInput, AuthenticateOutput,
     AuthenticationError, AuthenticationMethod, AuthenticationStepStatus, AuthorizeRequestOutput,
     CredentialsAuthParams, ExchangeTokenInput, GrantType, JwtToken, RefreshClaims,
-    TokenIntrospectionResponse,
+    SsoSessionBinding, TokenIntrospectionResponse,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +51,21 @@ pub struct AuthSession {
     pub compass_flow_id: Option<Uuid>,
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<CodeChallengeMethod>,
+    pub user_session_id: Option<Uuid>,
+    /// The "remember me" choice made on the login page, kept until the login
+    /// completes so the session it opens knows whether to persist.
+    pub remember_me: bool,
+    /// A live SSO session the browser still held when it was sent to the
+    /// login page; a login for the same user re-authenticates into it.
+    pub reauth_session_id: Option<Uuid>,
+    pub consent_token_hash: Option<String>,
+    pub prompt_consent: bool,
+}
+
+impl RealmOwned for AuthSession {
+    fn realm_id(&self) -> RealmId {
+        self.realm_id
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +86,7 @@ pub struct AuthSessionParams {
     pub compass_flow_id: Option<Uuid>,
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<CodeChallengeMethod>,
+    pub prompt_consent: bool,
 }
 
 impl AuthSession {
@@ -98,6 +114,11 @@ impl AuthSession {
             compass_flow_id: params.compass_flow_id,
             code_challenge: params.code_challenge,
             code_challenge_method: params.code_challenge_method,
+            user_session_id: None,
+            remember_me: false,
+            reauth_session_id: None,
+            consent_token_hash: None,
+            prompt_consent: params.prompt_consent,
         }
     }
 }

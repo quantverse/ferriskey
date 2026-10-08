@@ -6,6 +6,7 @@ import {
   Copy,
   KeyRound,
   Loader2,
+  Lock,
   Mail,
   QrCode as QrCodeIcon,
   ShieldCheck,
@@ -15,7 +16,7 @@ import type { Schemas } from '@/api/api.client'
 import { CapCaptcha } from '@/components/cap-captcha'
 import ProviderIcon, {
   isProviderIconKey,
-} from '@/pages/identity-providers/components/provider-icon'
+} from '@/components/provider-icon'
 import type { BuilderNode } from '../builder-core'
 import { PortalInput } from './components/portal-input'
 import { captchaAlignToJustify } from './captcha'
@@ -49,6 +50,11 @@ type RenderOptions = {
     clientName: string
     scopes: string[]
   }
+  consent?: {
+    clientName: string
+    defaultScopes: { name: string; description: string | null }[]
+    optionalScopes: { name: string; description: string | null }[]
+  }
   /**
    * Inline form-error message surfaced by the page's submit handler
    * (invalid credentials, email already in use, …). Read by the
@@ -66,10 +72,16 @@ type RenderOptions = {
    * `cursor: wait` and dim the button.
    */
   isSubmitting?: boolean
+  /**
+   * Blocks on the path to the page slot, stretched so the slot has room to
+   * take. Computed by `treeToReactNode`; callers never pass it.
+   */
+  fillPath?: Set<string>
 }
 
 export function treeToReactNode(tree: BuilderNode[], options: RenderOptions = {}): ReactNode {
-  return tree.map((node) => renderNode(node, options))
+  const fillPath = options.fillPath ?? pathToPageContent(tree)
+  return tree.map((node) => renderNode(node, { ...options, fillPath }))
 }
 
 /**
@@ -90,7 +102,11 @@ function renderNode(node: BuilderNode, options: RenderOptions): ReactNode {
   switch (node.type) {
     case 'container':
       return (
-        <div key={node.id} {...idAttr} style={containerStyle(node)}>
+        <div
+          key={node.id}
+          {...idAttr}
+          style={{ ...containerStyle(node), ...fillStyle(node, options) }}
+        >
           {node.children.length > 0
             ? node.children.map((c) => renderNode(c, options))
             : null}
@@ -105,7 +121,11 @@ function renderNode(node: BuilderNode, options: RenderOptions): ReactNode {
     case 'grid':
     case 'div':
       return (
-        <div key={node.id} {...idAttr} style={divStyle(node)}>
+        <div
+          key={node.id}
+          {...idAttr}
+          style={{ ...divStyle(node), ...fillStyle(node, options) }}
+        >
           {node.children.length > 0
             ? node.children.map((c) => renderNode(c, options))
             : null}
@@ -312,6 +332,57 @@ function renderNode(node: BuilderNode, options: RenderOptions): ReactNode {
           <span>{node.content ?? 'Deny'}</span>
         </button>
       )
+
+    case 'consent_allow_button':
+      return options.runtime ? (
+        <button
+          key={node.id}
+          {...idAttr}
+          type='submit'
+          data-fk-portal-btn=''
+          data-fk-busy={options.isSubmitting ? 'true' : 'false'}
+          disabled={options.isSubmitting}
+          style={{ ...buttonStyle(node), gap: 8, border: 'none', cursor: 'pointer' }}
+        >
+          {options.isSubmitting && (
+            <Loader2 size={16} aria-hidden data-fk-portal-spinner='' />
+          )}
+          <span>{node.content ?? 'Allow'}</span>
+        </button>
+      ) : (
+        <a
+          key={node.id}
+          {...idAttr}
+          href='#'
+          data-fk-portal-btn=''
+          style={buttonStyle(node)}
+        >
+          {node.content ?? 'Allow'}
+        </a>
+      )
+
+    case 'consent_deny_button':
+      return (
+        <button
+          key={node.id}
+          {...idAttr}
+          type='button'
+          data-fk-action='consent-deny'
+          data-fk-portal-btn=''
+          style={{
+            ...buttonStyle(node),
+            gap: 8,
+            cursor: options.runtime ? 'pointer' : 'default',
+          }}
+          disabled={!options.runtime}
+        >
+          <Ban size={16} aria-hidden />
+          <span>{node.content ?? 'Deny'}</span>
+        </button>
+      )
+
+    case 'consent_scopes':
+      return <ConsentScopesBlock key={node.id} node={node} options={options} />
 
     // Magic link / passkey: rendered as alternative auth actions. The host
     // portal page wires the click behavior by selecting on the
@@ -602,19 +673,11 @@ function renderNode(node: BuilderNode, options: RenderOptions): ReactNode {
       )
 
     case 'page-content':
-      // The slot must always span the full content area its layout exposes,
-      // regardless of how the surrounding container is aligned. Without an
-      // explicit `width: 100%`, a parent like `Container { align: center }`
-      // (very common: an admin who wants their card centred) collapses the
-      // slot to the page tree's intrinsic width — so even a `width: 100%`
-      // div inside the page would only stretch to whatever its siblings
-      // happen to be, not to the layout's actual horizontal real estate.
-      // `align-self: stretch` covers the flex-child case in one go.
       return (
         <div
           key={node.id}
           data-portal-page-content
-          style={{ width: '100%', alignSelf: 'stretch' }}
+          style={pageContentStyle(node)}
         >
           {options.pageContent ?? null}
         </div>
@@ -906,6 +969,114 @@ export function PortalCaptchaBlock({
   )
 }
 
+const PLACEHOLDER_CONSENT: NonNullable<RenderOptions['consent']> = {
+  clientName: 'Acme Inc.',
+  defaultScopes: [{ name: 'openid', description: 'Confirm your identity' }],
+  optionalScopes: [
+    { name: 'profile', description: 'View your basic profile information' },
+    { name: 'email', description: 'View your email address' },
+  ],
+}
+
+export function ConsentScopesBlock({
+  node,
+  options,
+}: {
+  node: BuilderNode
+  options: RenderOptions
+}) {
+  const consent = options.consent ?? (options.runtime ? null : PLACEHOLDER_CONSENT)
+  if (!consent) return null
+
+  return (
+    <div
+      data-fk-id={node.id}
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 12,
+        ...orderStyle(node),
+      }}
+    >
+      <p style={{ margin: 0, fontSize: 'var(--fk-font-base-size, 14px)', color: 'var(--fk-color-body-text, #374151)' }}>
+        <strong>{consent.clientName}</strong>{' '}
+        {(node.props.label as string) || 'is requesting access to your account.'}
+      </p>
+      {consent.defaultScopes.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {consent.defaultScopes.map((scope) => (
+            <div key={scope.name} style={consentScopeRowStyle()}>
+              <Lock size={14} aria-hidden style={{ opacity: 0.45, flexShrink: 0 }} />
+              <div style={{ display: 'flex', flexDirection: 'column' }}>
+                <span style={consentScopeNameStyle()}>{scope.name}</span>
+                {scope.description ? (
+                  <span style={consentScopeDescriptionStyle()}>{scope.description}</span>
+                ) : null}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {consent.optionalScopes.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {consent.optionalScopes.map((scope) => (
+            <div key={scope.name} style={consentScopeRowStyle()}>
+              <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
+                <span style={consentScopeNameStyle()}>{scope.name}</span>
+                {scope.description ? (
+                  <span style={consentScopeDescriptionStyle()}>{scope.description}</span>
+                ) : null}
+              </div>
+              <input
+                type='checkbox'
+                name='approved_scopes'
+                value={scope.name}
+                defaultChecked
+                disabled={!options.runtime}
+                aria-label={scope.name}
+                style={{
+                  width: 18,
+                  height: 18,
+                  accentColor: 'var(--fk-color-primary-button, #635dff)',
+                  cursor: options.runtime ? 'pointer' : 'default',
+                  flexShrink: 0,
+                }}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function consentScopeRowStyle(): CSSProperties {
+  return {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    padding: '8px 10px',
+    borderRadius: 'var(--fk-radius-input, 6px)',
+    border: '1px solid rgba(0,0,0,0.08)',
+    background: 'rgba(0,0,0,0.02)',
+  }
+}
+
+function consentScopeNameStyle(): CSSProperties {
+  return {
+    fontSize: 'var(--fk-font-base-size, 14px)',
+    fontWeight: 500,
+    color: 'var(--fk-color-body-text, #111827)',
+  }
+}
+
+function consentScopeDescriptionStyle(): CSSProperties {
+  return {
+    fontSize: 12,
+    color: 'var(--fk-color-body-text, #6b7280)',
+  }
+}
+
 export function IdentityProvidersBlock({
   node,
   providers,
@@ -1165,12 +1336,97 @@ export function cardFooterStyle(node: BuilderNode): CSSProperties {
   }
 }
 
+/**
+ * The slot the page is rendered into.
+ *
+ * It spans the full content area its layout exposes whatever the surrounding
+ * container does: without an explicit `width: 100%`, a parent like
+ * `Container { align: center }` — very common, an admin centring their card —
+ * collapses the slot to the page's intrinsic width. `align-self: stretch`
+ * covers the flex-child case in one go.
+ *
+ * It also fills the viewport by default, so a page lands on a surface it can
+ * centre things in rather than one that hugs its content. Both minimums are
+ * plain props, so an author who wants the slot to hug its content again just
+ * clears them.
+ */
+export function pageContentStyle(node: BuilderNode): CSSProperties {
+  return {
+    width: '100%',
+    alignSelf: 'stretch',
+    // `flex: 1` and not `min-height: 100vh`: the slot has siblings — a header,
+    // a footer — and an absolute height would stack on top of theirs and push
+    // the page into a scrollbar. Taking the leftover room fills the viewport
+    // exactly, whatever surrounds it.
+    flex: '1 1 auto',
+    minHeight: (node.props.minHeight as string) || 0,
+    minWidth: (node.props.minWidth as string) || undefined,
+    display: 'flex',
+    flexDirection: 'column',
+    justifyContent: (node.props.justifyContent as string) || 'center',
+    alignItems: (node.props.alignItems as string) || 'center',
+  }
+}
+
+/**
+ * Stretches a block that sits between the root and the page slot, unless its
+ * author already said how it should behave.
+ */
+function fillStyle(node: BuilderNode, options: RenderOptions): CSSProperties {
+  if (!options.fillPath?.has(node.id)) return {}
+  if (node.props.flexGrow !== undefined && node.props.flexGrow !== '') return {}
+
+  // Growing is only half the job: a `div` defaults to `display: block`, whose
+  // children are not flex items, so the slot inside would stay content-height
+  // no matter how tall its ancestor grew. Give an ancestor that never chose a
+  // display one that passes the height down; an explicit choice is left alone.
+  const display = (node.props.display as string) || ''
+  const layout: CSSProperties =
+    display === '' && node.type !== 'container'
+      ? { display: 'flex', flexDirection: 'column' }
+      : {}
+
+  return { ...layout, flexGrow: 1, minHeight: 0 }
+}
+
+/**
+ * Ids of the blocks between the tree's root and the page slot.
+ *
+ * "Leftover room" only exists if every ancestor of the slot claims it too —
+ * a flex child that doesn't grow hands its children nothing to share. Rather
+ * than asking an author to tick "fill" on each level, the renderer walks the
+ * path once and stretches it.
+ */
+function pathToPageContent(tree: BuilderNode[]): Set<string> {
+  const path = new Set<string>()
+
+  const walk = (nodes: BuilderNode[], ancestors: string[]): boolean =>
+    nodes.some((node) => {
+      if (node.type === 'page-content') {
+        ancestors.forEach((id) => path.add(id))
+        return true
+      }
+      return walk(node.children, [...ancestors, node.id])
+    })
+
+  walk(tree, [])
+  return path
+}
+
 export function containerStyle(node: BuilderNode): CSSProperties {
   const order = (node.props.order as string) || ''
   return {
-    display: 'flex',
+    // `display` was hardcoded to flex. It stays the default, so a stored
+    // container is unaffected, but a layout can now ask for block or grid.
+    display: ((node.props.display as string) || 'flex') as CSSProperties['display'],
     flexDirection: ((node.props.direction as string) || 'column') as 'row' | 'column',
     alignItems: (node.props.align as string) || 'stretch',
+    // Main-axis placement, and whether the container takes the height left
+    // over by its siblings — together, that is what lets a layout centre its
+    // content on the page. Both stay `undefined` when unset, so the emitted
+    // style is byte-for-byte what it was for every container already saved.
+    justifyContent: (node.props.justifyContent as string) || undefined,
+    flexGrow: (node.props.flexGrow as string) ? Number(node.props.flexGrow) : undefined,
     gap: (node.props.gap as string) || '12px',
     padding: (node.props.padding as string) || '16px',
     backgroundColor: (node.props.backgroundColor as string) || undefined,
@@ -1592,6 +1848,15 @@ export function buttonStyle(node: BuilderNode): CSSProperties {
   const justifyContent =
     align === 'left' ? 'flex-start' : align === 'right' ? 'flex-end' : 'center'
 
+  // Per-node colour overrides. Empty means "follow the theme", so each one
+  // falls back to the token the variant would have used — a button saved
+  // before these props existed renders exactly as it did. `||` and not `??`:
+  // clearing the field in the config panel stores an empty string, which must
+  // read as "unset" and not reach the stylesheet.
+  const backgroundOverride = (node.props.backgroundColor as string) || ''
+  const labelOverride = (node.props.color as string) || ''
+  const borderOverride = (node.props.borderColor as string) || ''
+
   const base: CSSProperties = {
     display: 'inline-flex',
     alignItems: 'center',
@@ -1610,25 +1875,30 @@ export function buttonStyle(node: BuilderNode): CSSProperties {
   if (variant === 'secondary') {
     return {
       ...base,
-      backgroundColor: 'var(--fk-color-secondary-button, #ffffff)',
-      color: 'var(--fk-color-secondary-button-label, #111827)',
-      borderColor: 'var(--fk-color-body-text, #d1d5db)',
+      backgroundColor: backgroundOverride || 'var(--fk-color-secondary-button, #ffffff)',
+      color: labelOverride || 'var(--fk-color-secondary-button-label, #111827)',
+      borderColor: borderOverride || 'var(--fk-color-body-text, #d1d5db)',
     }
   }
 
   if (variant === 'outline') {
     return {
       ...base,
-      backgroundColor: 'transparent',
-      color: 'var(--fk-color-primary-button, #635dff)',
-      borderColor: 'var(--fk-color-primary-button, #635dff)',
+      // Stays transparent unless the author asks otherwise — an outline button
+      // that painted a token background would stop being an outline button.
+      backgroundColor: backgroundOverride || 'transparent',
+      color: labelOverride || 'var(--fk-color-primary-button, #635dff)',
+      borderColor: borderOverride || 'var(--fk-color-primary-button, #635dff)',
     }
   }
 
   return {
     ...base,
-    backgroundColor: 'var(--fk-color-primary-button, #635dff)',
-    color: 'var(--fk-color-primary-button-label, #ffffff)',
+    backgroundColor: backgroundOverride || 'var(--fk-color-primary-button, #635dff)',
+    color: labelOverride || 'var(--fk-color-primary-button-label, #ffffff)',
+    // `base` already draws a transparent border, so this only matters when the
+    // author sets one.
+    borderColor: borderOverride || undefined,
   }
 }
 

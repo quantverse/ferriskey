@@ -1,0 +1,74 @@
+import { useMemo } from 'react'
+import { useNavigate, useParams } from 'react-router'
+import { useTranslation } from 'react-i18next'
+import { useGetClient } from '@/api/client.api'
+import { RouterParams } from '@/routes/router'
+import { useRouteTabs, type TabItem } from '@/components/kit'
+import { CLIENTS_URL } from '@/routes/router'
+import { CLIENT_URL } from '../client-routes'
+import PageClientDetail from '../ui/page-client-detail'
+import ClientSettingsTabFeature from './client-settings-tab-feature'
+import ClientCredentialsTabFeature from './client-credentials-tab-feature'
+import ClientRolesTabFeature from './client-roles-tab-feature'
+import ClientScopesTabFeature from './client-scopes-tab-feature'
+import ClientSamlTabFeature from './client-saml-tab-feature'
+import ClientTokenExchangeTabFeature from './client-token-exchange-tab-feature'
+import ClientMaintenanceTabFeature from './client-maintenance-tab-feature'
+import { useCrumbLabel } from '@/components/shell/crumb-store'
+
+export default function PageClientDetailFeature() {
+  const { realm_name, client_id } = useParams<RouterParams>()
+  const navigate = useNavigate()
+  const { t } = useTranslation('client')
+  const realm = realm_name ?? 'master'
+
+  const { data: clientResponse, isLoading } = useGetClient({ realm, clientId: client_id })
+  const client = clientResponse?.data
+
+  const hasSecret = Boolean(client?.secret)
+  const isSaml = client?.protocol === 'saml'
+
+  const tabList = useMemo<TabItem[]>(
+    () => [
+      { key: 'settings', label: t('detail.tabs.settings') },
+      ...(hasSecret ? [{ key: 'credentials', label: t('detail.tabs.credentials') }] : []),
+      { key: 'roles', label: t('detail.tabs.roles') },
+      { key: 'scopes', label: t('detail.tabs.scopes') },
+      { key: 'token-exchange', label: t('detail.tabs.token_exchange') },
+      ...(isSaml ? [{ key: 'saml', label: t('detail.tabs.saml') }] : []),
+      { key: 'maintenance', label: t('detail.tabs.maintenance') },
+    ],
+    [hasSecret, isSaml, t]
+  )
+
+  const { value: tab, tabs } = useRouteTabs(CLIENT_URL(realm, client_id), tabList)
+
+
+  useCrumbLabel(client_id, client?.name ?? client?.client_id)
+
+  return (
+    <PageClientDetail
+      client={client}
+      isLoading={isLoading}
+      tab={tab}
+      tabs={tabs}
+      onBack={() => navigate(CLIENTS_URL(realm))}
+    >
+      {client && tab === 'settings' && <ClientSettingsTabFeature client={client} realm={realm} />}
+      {client && tab === 'credentials' && (
+        <ClientCredentialsTabFeature client={client} realm={realm} />
+      )}
+      {client && tab === 'roles' && <ClientRolesTabFeature client={client} realm={realm} />}
+      {client && tab === 'scopes' && <ClientScopesTabFeature client={client} realm={realm} />}
+      {client && tab === 'token-exchange' && (
+        <ClientTokenExchangeTabFeature client={client} realm={realm} />
+      )}
+      {client && isSaml && tab === 'saml' && (
+        <ClientSamlTabFeature client={client} realm={realm} />
+      )}
+      {client && tab === 'maintenance' && (
+        <ClientMaintenanceTabFeature client={client} realm={realm} />
+      )}
+    </PageClientDetail>
+  )
+}

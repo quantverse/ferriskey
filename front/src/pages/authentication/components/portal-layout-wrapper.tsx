@@ -11,15 +11,19 @@ import { useSetupOtp } from '@/api/trident.api'
 import type { RouterParams } from '@/routes/router'
 import type { BuilderNode } from '@/lib/builder-core'
 import { generateBreakpointCss, treeToReactNode } from '@/lib/builder-portal'
-import { mergeWithDefaults, themeToCssVars } from '@/pages/portal-theme/lib/theme'
+import { mergeWithDefaults, themeToCssVars } from '@/lib/portal-theme/theme'
 import type { Schemas } from '@/api/api.client'
 import { useDevicePreview } from '@/api/device.api'
+import { toConsentScopeList, useGetConsentRequest } from '@/api/consent.api'
 import { usePortalPageSubmit } from '../hooks/use-portal-page-submit'
 import { usePasskeyAuth } from '../hooks/use-passkey-auth'
 import {
   DeviceVerifyResult,
   DeviceVerifyShell,
 } from '../ui/page-device-verify'
+
+// Builder-authored pages have no "remember me" control yet.
+const neverRemember = () => false
 
 function parseTree(tree: unknown): BuilderNode[] {
   if (Array.isArray(tree)) {
@@ -117,6 +121,26 @@ export function PortalLayoutWrapper({ children, pageType }: Props) {
     }
   }, [pageType, devicePreviewData])
 
+  const consentToken =
+    pageType === 'consent'
+      ? new URLSearchParams(
+          typeof window === 'undefined' ? '' : window.location.search,
+        ).get('consent_token') ?? ''
+      : ''
+  const { data: consentRequestData } = useGetConsentRequest({
+    realm,
+    consentToken,
+    enabled: pageType === 'consent' && consentToken.length > 0,
+  })
+  const consent = useMemo(() => {
+    if (pageType !== 'consent' || !consentRequestData) return undefined
+    return {
+      clientName: consentRequestData.client_name,
+      defaultScopes: toConsentScopeList(consentRequestData.granted_by_default),
+      optionalScopes: toConsentScopeList(consentRequestData.awaiting_decision),
+    }
+  }, [pageType, consentRequestData])
+
   const totpSetup = useMemo(
     () => {
       if (
@@ -180,9 +204,10 @@ export function PortalLayoutWrapper({ children, pageType }: Props) {
   // block reads this through the render options and shows or hides
   // itself accordingly.
   const [formError, setFormError] = useState<string | null>(null)
-  const { onSubmit, isSubmitting, onDeviceDeny, deviceResult, onDeviceReset } =
+  const { onSubmit, isSubmitting, onDeviceDeny, deviceResult, onDeviceReset, onConsentDeny } =
     usePortalPageSubmit(pageType, {
       onFormError: setFormError,
+      consentOptionalScopes: consent?.optionalScopes,
     })
 
   // Passkey + magic-link buttons rendered inside the custom portal tree
@@ -194,6 +219,7 @@ export function PortalLayoutWrapper({ children, pageType }: Props) {
     realm_name: realm,
     enabled: loginSettings?.passkey_enabled ?? false,
     isAuthInitiated: true,
+    getRememberMe: neverRemember,
   })
   const navigate = useNavigate()
 
@@ -225,6 +251,13 @@ export function PortalLayoutWrapper({ children, pageType }: Props) {
         return
       }
 
+      if (action === 'consent-deny') {
+        event.preventDefault()
+        const form = trigger.closest('form')
+        if (form && onConsentDeny) onConsentDeny(new FormData(form))
+        return
+      }
+
       if (action === 'magic-link') {
         event.preventDefault()
         // Carry over whatever the user already typed into the page's
@@ -239,7 +272,7 @@ export function PortalLayoutWrapper({ children, pageType }: Props) {
         navigate(`/realms/${realm}/authentication/magic-link-request${query}`)
       }
     },
-    [navigate, onDeviceDeny, onPasskeyLogin, realm],
+    [navigate, onConsentDeny, onDeviceDeny, onPasskeyLogin, realm],
   )
 
   if (
@@ -342,6 +375,28 @@ export function PortalLayoutWrapper({ children, pageType }: Props) {
     <style dangerouslySetInnerHTML={{ __html: buttonInteractionCss }} />
   )
 
+  /**
+   * The page the portal is drawn on.
+   *
+   * The theme has always exposed a page background, but only the loading state
+   * ever painted it — every finished screen rendered on whatever the browser
+   * happened to show, which is why a layout shorter than the viewport left a
+   * bare strip below itself. Giving the root the theme's colour and the full
+   * viewport height makes that setting mean something, and gives a layout a
+   * page to fill.
+   *
+   * `flex column` is what lets a layout opt into filling the leftover height
+   * (see the container's `flexGrow`); with a single child it changes nothing
+   * for layouts that don't ask.
+   */
+  const pageSurface: CSSProperties = {
+    ...cssVars,
+    minHeight: '100vh',
+    background: 'var(--fk-color-page-bg)',
+    display: 'flex',
+    flexDirection: 'column',
+  }
+
   // The layout is only renderable when it has a `page-content` slot.
   // Without one, applying it would hide the page entirely.
   const layoutIsValid = layoutTree.length > 0 && layoutHasPageContent(layoutTree)
@@ -370,7 +425,7 @@ export function PortalLayoutWrapper({ children, pageType }: Props) {
         <style dangerouslySetInnerHTML={{ __html: verifiedStyleCss }} />
       ) : null
       return (
-        <div style={cssVars} onClick={handlePortalActionClick}>
+        <div style={pageSurface} onClick={handlePortalActionClick}>
           {verifiedStyle}
           {buttonInteractionStyle}
           {layoutIsValid
@@ -384,7 +439,7 @@ export function PortalLayoutWrapper({ children, pageType }: Props) {
       )
     }
     return (
-      <div style={cssVars}>
+      <div style={pageSurface}>
         <DeviceVerifyShell>
           <DeviceVerifyResult
             status={deviceResult}
@@ -397,7 +452,7 @@ export function PortalLayoutWrapper({ children, pageType }: Props) {
 
   if (!pageIsValid || (layoutTree.length > 0 && !layoutIsValid)) {
     return (
-      <div style={cssVars}>
+      <div style={pageSurface}>
         {responsiveStyle}
         {buttonInteractionStyle}
         {children}
@@ -407,13 +462,13 @@ export function PortalLayoutWrapper({ children, pageType }: Props) {
 
   const pageContent: ReactNode = (
     <form onSubmit={handleSubmit}>
-      {treeToReactNode(pageTree, { runtime: true, identityProviders, totpSetup, deviceConsent, formError, isSubmitting })}
+      {treeToReactNode(pageTree, { runtime: true, identityProviders, totpSetup, deviceConsent, consent, formError, isSubmitting })}
     </form>
   )
 
   if (!layoutIsValid) {
     return (
-      <div style={cssVars} onClick={handlePortalActionClick}>
+      <div style={pageSurface} onClick={handlePortalActionClick}>
         {responsiveStyle}
         {buttonInteractionStyle}
         {pageContent}
@@ -422,10 +477,10 @@ export function PortalLayoutWrapper({ children, pageType }: Props) {
   }
 
   return (
-    <div style={cssVars} onClick={handlePortalActionClick}>
+    <div style={pageSurface} onClick={handlePortalActionClick}>
       {responsiveStyle}
       {buttonInteractionStyle}
-      {treeToReactNode(layoutTree, { runtime: true, pageContent, identityProviders, totpSetup, deviceConsent, formError, isSubmitting })}
+      {treeToReactNode(layoutTree, { runtime: true, pageContent, identityProviders, totpSetup, deviceConsent, consent, formError, isSubmitting })}
     </div>
   )
 }

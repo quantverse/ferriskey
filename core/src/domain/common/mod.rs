@@ -4,6 +4,7 @@ use uuid::{NoContext, Timestamp, Uuid};
 
 pub mod email;
 pub mod entities;
+pub mod locale;
 pub mod policies;
 pub mod ports;
 pub mod services;
@@ -18,6 +19,10 @@ pub struct FerriskeyConfig {
     /// Public origin the admin console is served from. Seeding needs it to register
     /// the console's callback as an exact redirect URI — see [`console_callback_uri`].
     pub webapp_url: String,
+    /// Opt-in escape hatch for local development: lets a webhook endpoint resolve to a loopback
+    /// or private address. Off unless explicitly enabled. Link-local addresses stay refused even
+    /// when this is on — see `PrivateEndpoints`.
+    pub webhook_allow_private_endpoints: bool,
 }
 
 #[derive(Clone, Debug)]

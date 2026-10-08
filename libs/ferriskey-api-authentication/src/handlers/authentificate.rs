@@ -42,6 +42,11 @@ pub struct AuthenticateRequest {
 
     #[serde(default)]
     pub captcha_token: Option<String>,
+
+    /// Keep the SSO session past the browser closing. Honoured only when the
+    /// realm enables "remember me".
+    #[serde(default)]
+    pub remember_me: bool,
 }
 
 #[utoipa::path(
@@ -124,6 +129,7 @@ pub async fn authenticate(
             base_url.clone(),
             username,
             password,
+            payload.remember_me,
         )
     };
 
@@ -172,9 +178,20 @@ pub async fn authenticate(
     }
 
     let step_token = result.temporary_token.clone();
+    let sso_session = result
+        .sso_cookie
+        .clone()
+        .map(|secret| (secret, result.sso_session_max_age_secs));
     let response: AuthenticateResponse = result.into();
 
     let mut headers = HeaderMap::new();
+
+    if let Some((secret, max_age_secs)) = sso_session {
+        headers.append(
+            SET_COOKIE,
+            crate::sso_cookie::set(secret, max_age_secs, base_url.starts_with("https"))?,
+        );
+    }
     if let Some(token) = step_token {
         let mut flow_cookie = Cookie::build((LOGIN_ACTION_COOKIE, token))
             .path(format!("/realms/{realm_name}/login-actions"))

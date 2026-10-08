@@ -1,16 +1,18 @@
 use std::sync::Arc;
 
+use ferriskey_authz::FerriskeyPolicy;
 use ferriskey_domain::auth::Identity;
 use ferriskey_domain::client::ports::ClientRepository;
 use ferriskey_domain::common::app_errors::CoreError;
-use ferriskey_domain::common::policies::{FerriskeyPolicy, ensure_policy};
+use ferriskey_domain::common::policies::ensure_policy;
 use ferriskey_domain::realm::ports::RealmRepository;
+use ferriskey_domain::realm::scope::RealmScope;
 use ferriskey_domain::user::ports::{UserRepository, UserRoleRepository};
 
 use crate::entities::SecurityEvent;
 use crate::hashing::{VerifyResult, verify_chain};
 use crate::ports::{SecurityEventPolicy, SecurityEventRepository, SecurityEventService};
-use crate::value_objects::{FetchEventsInput, SecurityEventFilter};
+use crate::value_objects::FetchEventsInput;
 
 #[derive(Clone, Debug)]
 pub struct SecurityEventServiceImpl<R, U, C, UR, SE>
@@ -60,27 +62,16 @@ where
         identity: Identity,
         input: FetchEventsInput,
     ) -> Result<Vec<SecurityEvent>, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&input.realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &input.realm_name).await?;
 
-        let realm_id = realm.id;
         ensure_policy(
-            self.policy.can_view_events(&identity, &realm).await,
+            self.policy.can_view_events(&identity, scope.realm()).await,
             "insufficient permissions",
         )?;
 
         let security_events = self
             .security_event_repository
-            .get_events(
-                realm_id,
-                SecurityEventFilter {
-                    ..Default::default()
-                },
-            )
+            .get_events(scope.id(), input.filter)
             .await?;
 
         Ok(security_events)
@@ -91,21 +82,18 @@ where
         identity: Identity,
         realm_name: String,
     ) -> Result<VerifyResult, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&realm_name)
-            .await
-            .map_err(|_| CoreError::InvalidRealm)?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &realm_name).await?;
 
         ensure_policy(
-            self.policy.can_view_events(&identity, &realm).await,
+            self.policy
+                .can_export_events(&identity, scope.realm())
+                .await,
             "insufficient permissions",
         )?;
 
         let events = self
             .security_event_repository
-            .get_events_ordered_for_verification(realm.id)
+            .get_events_ordered_for_verification(scope.id())
             .await?;
 
         Ok(verify_chain(&events))

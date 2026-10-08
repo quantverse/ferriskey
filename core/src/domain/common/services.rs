@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use crate::domain::authentication::entities::AuthProtocol;
+
 use ferriskey_security::jwt::ports::KeyStoreRepository;
 
 use crate::domain::{
@@ -16,7 +18,7 @@ use crate::domain::{
     },
     credential::ports::CredentialRepository,
     crypto::HasherRepository,
-    realm::ports::RealmRepository,
+    realm::{entities::RealmScope, ports::RealmRepository},
     role::{
         entities::permission::Permissions, ports::RoleRepository, value_objects::CreateRoleRequest,
     },
@@ -207,6 +209,8 @@ where
                 );
 
                 client
+                    .in_realm(&RealmScope::from_realm(realm.clone()))?
+                    .into_inner()
             }
             Err(_) => {
                 tracing::info!("createing client {:}", config.default_client_id.clone());
@@ -217,15 +221,17 @@ where
                         name: config.default_client_id.clone(),
                         client_id: config.default_client_id.clone(),
                         enabled: true,
-                        protocol: "openid-connect".to_string(),
+                        protocol: AuthProtocol::OpenIdConnect,
                         // Browser SPA: no secret to keep, PKCE instead.
                         public_client: true,
                         service_account_enabled: false,
                         direct_access_grants_enabled: false,
                         oauth_device_code_grant_enabled: false,
+                        token_exchange_enabled: false,
                         client_type: ClientType::Public,
                         secret: None,
                         require_pkce: true,
+                        consent_required: false,
                     })
                     .await
                     .map_err(|_| CoreError::CreateClientError)?;
@@ -246,6 +252,8 @@ where
             Ok(client) => {
                 tracing::info!("client {:} created", master_realm_client_id.clone());
                 client
+                    .in_realm(&RealmScope::from_realm(realm.clone()))?
+                    .into_inner()
             }
             Err(_) => {
                 tracing::info!("creating client {:}", master_realm_client_id.clone());
@@ -257,14 +265,16 @@ where
                         name: master_realm_client_id.clone(),
                         client_id: master_realm_client_id.clone(),
                         enabled: true,
-                        protocol: "openid-connect".to_string(),
+                        protocol: AuthProtocol::OpenIdConnect,
                         public_client: false,
                         service_account_enabled: false,
                         direct_access_grants_enabled: true,
                         oauth_device_code_grant_enabled: false,
+                        token_exchange_enabled: false,
                         client_type: ClientType::Confidential,
                         secret: Some(generate_random_string()),
                         require_pkce: false,
+                        consent_required: false,
                     })
                     .await
                     .map_err(|_| CoreError::CreateClientError)?;
@@ -291,14 +301,16 @@ where
                         name: "admin-cli".to_string(),
                         client_id: "admin-cli".to_string(),
                         enabled: true,
-                        protocol: "openid-connect".to_string(),
+                        protocol: AuthProtocol::OpenIdConnect,
                         public_client: true,
                         service_account_enabled: false,
                         direct_access_grants_enabled: true,
                         oauth_device_code_grant_enabled: true,
+                        token_exchange_enabled: false,
                         client_type: ClientType::System,
                         secret: None,
                         require_pkce: false,
+                        consent_required: false,
                     })
                     .await
                     .map_err(|_| CoreError::CreateClientError)?;
@@ -323,6 +335,7 @@ where
                 let user = self
                     .user_repository
                     .create_user(CreateUserRequest {
+                        id: None,
                         email: Some(config.admin_email.clone()),
                         email_verified: true,
                         enabled: true,
@@ -459,7 +472,7 @@ where
             {
                 Ok(c) => {
                     tracing::info!("security-admin-console already exists in realm {:}", r.name);
-                    c
+                    c.in_realm(&RealmScope::from_realm(r.clone()))?.into_inner()
                 }
                 Err(_) => {
                     tracing::info!("creating security-admin-console for realm {:}", r.name);
@@ -470,15 +483,17 @@ where
                             name: config.default_client_id.clone(),
                             client_id: config.default_client_id.clone(),
                             enabled: true,
-                            protocol: "openid-connect".to_string(),
+                            protocol: AuthProtocol::OpenIdConnect,
                             // Browser SPA: no secret to keep, PKCE instead.
                             public_client: true,
                             service_account_enabled: false,
                             direct_access_grants_enabled: false,
                             oauth_device_code_grant_enabled: false,
+                            token_exchange_enabled: false,
                             client_type: ClientType::Public,
                             secret: None,
                             require_pkce: true,
+                            consent_required: false,
                         })
                         .await
                     {
@@ -532,6 +547,7 @@ where
 
 #[cfg(test)]
 pub mod tests {
+    use crate::domain::authentication::entities::AuthProtocol;
     use std::panic;
 
     use chrono::Utc;
@@ -565,6 +581,7 @@ pub mod tests {
             updated_at: Utc::now(),
             failed_login_attempts: 0,
             locked_until: None,
+            locale: None,
         }
     }
 
@@ -586,6 +603,7 @@ pub mod tests {
             roles: Some(Vec::new()),
             failed_login_attempts: 0,
             locked_until: None,
+            locale: None,
         }
     }
 
@@ -612,6 +630,7 @@ pub mod tests {
             roles: Some(Vec::new()),
             failed_login_attempts: 0,
             locked_until: None,
+            locale: None,
         }
     }
 
@@ -644,6 +663,7 @@ pub mod tests {
             roles: Some(Vec::new()),
             failed_login_attempts: 0,
             locked_until: None,
+            locale: None,
         }
     }
 
@@ -722,10 +742,11 @@ pub mod tests {
             public_client: false,
             direct_access_grants_enabled: true,
             oauth_device_code_grant_enabled: false,
+            token_exchange_enabled: false,
             require_pkce: false,
             service_account_enabled: true,
             client_type: ClientType::Confidential,
-            protocol: "openid-connect".to_string(),
+            protocol: AuthProtocol::OpenIdConnect,
             redirect_uris: None,
             access_token_lifetime: None,
             refresh_token_lifetime: None,
@@ -736,6 +757,9 @@ pub mod tests {
             maintenance_session_strategy: MaintenanceSessionStrategy::default(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            backchannel_logout_uri: None,
+            backchannel_logout_session_required: true,
+            consent_required: false,
         };
 
         Identity::Client(client)

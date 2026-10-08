@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use serde_json::json;
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::domain::{
@@ -16,7 +16,10 @@ use crate::domain::{
         ports::{MaintenanceWhitelistRepository, RealmMaintenanceWhitelistRepository},
         value_objects::ToggleMaintenanceRequest,
     },
-    realm::ports::RealmRepository,
+    realm::{
+        entities::{RealmScope, Scoped},
+        ports::RealmRepository,
+    },
     seawatch::{EventStatus, SecurityEvent, SecurityEventRepository, SecurityEventType},
     user::ports::{UserRepository, UserRoleRepository},
     webhook::{
@@ -24,6 +27,7 @@ use crate::domain::{
         ports::WebhookRepository,
     },
 };
+use ferriskey_domain::client::entities::Client;
 use ferriskey_domain::client::ports::ClientPolicy;
 use ferriskey_domain::client::value_objects::UpdateClientRequest;
 use ferriskey_domain::maintenance::ports::MaintenanceService;
@@ -81,6 +85,30 @@ where
             policy,
         }
     }
+
+    async fn load_entry_of_client(
+        &self,
+        entry_id: Uuid,
+        client: &Scoped<Client>,
+    ) -> Result<MaintenanceWhitelistEntry, CoreError> {
+        let entry = self
+            .maintenance_whitelist_repository
+            .get_by_id(entry_id)
+            .await?
+            .ok_or(CoreError::NotFound)?;
+
+        if entry.client_id != client.get().id {
+            warn!(
+                entry_id = %entry_id,
+                entry_client_id = %entry.client_id,
+                request_client_id = %client.get().id,
+                "Refused access to a maintenance whitelist entry of another client"
+            );
+            return Err(CoreError::NotFound);
+        }
+
+        Ok(entry)
+    }
 }
 
 impl<R, U, C, UR, W, SE, MW, RMW> MaintenanceService
@@ -102,22 +130,22 @@ where
         client_id: Uuid,
         request: ToggleMaintenanceRequest,
     ) -> Result<(), CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &realm_name).await?;
+        let realm_id = scope.id();
 
         ensure_policy(
-            self.policy.can_update_client(&identity, &realm).await,
+            self.policy
+                .can_update_client(&identity, scope.realm())
+                .await,
             "insufficient permissions to toggle maintenance",
         )?;
 
         let client = self
             .client_repository
-            .get_by_id(realm.id, client_id)
+            .get_by_id(realm_id, client_id)
             .await
-            .map_err(|_| CoreError::ClientNotFound)?;
+            .map_err(|_| CoreError::ClientNotFound)?
+            .in_realm(&scope)?;
 
         let update = UpdateClientRequest {
             name: None,
@@ -125,6 +153,7 @@ where
             enabled: None,
             direct_access_grants_enabled: None,
             oauth_device_code_grant_enabled: None,
+            token_exchange_enabled: None,
             require_pkce: None,
             access_token_lifetime: None,
             refresh_token_lifetime: None,
@@ -133,10 +162,13 @@ where
             maintenance_enabled: Some(request.enabled),
             maintenance_reason: Some(request.reason.clone()),
             maintenance_session_strategy: request.session_strategy.clone(),
+            backchannel_logout_uri: None,
+            backchannel_logout_session_required: None,
+            consent_required: None,
         };
 
         self.client_repository
-            .update_client(realm.id, client_id, update)
+            .update_client(&client, update)
             .await
             .map_err(|_| CoreError::InternalServerError)?;
 
@@ -159,13 +191,13 @@ where
             } else {
                 "disabled"
             },
-            client.name,
+            client.get().name,
             client_id
         );
 
         self.security_event_repository
             .store_event(
-                SecurityEvent::new(realm.id, event_type, EventStatus::Success, identity.id())
+                SecurityEvent::new(realm_id, event_type, EventStatus::Success, identity.id())
                     .with_target("client".to_string(), client_id, None)
                     .with_details(json!({
                         "enabled": request.enabled,
@@ -177,8 +209,8 @@ where
 
         self.webhook_repository
             .notify(
-                realm.id,
-                WebhookPayload::new(trigger, realm.id.into(), Some(client)),
+                realm_id,
+                WebhookPayload::new(trigger, realm_id.into(), Some(client.into_inner())),
             )
             .await?;
 
@@ -234,17 +266,21 @@ where
         client_id: Uuid,
         user_id: Uuid,
     ) -> Result<MaintenanceWhitelistEntry, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &realm_name).await?;
         ensure_policy(
-            self.policy.can_update_client(&identity, &realm).await,
+            self.policy
+                .can_update_client(&identity, scope.realm())
+                .await,
             "insufficient permissions to manage maintenance whitelist",
         )?;
+        let client = self
+            .client_repository
+            .get_by_id(scope.id(), client_id)
+            .await
+            .map_err(|_| CoreError::NotFound)?
+            .in_realm(&scope)?;
         self.maintenance_whitelist_repository
-            .add_user(client_id, user_id)
+            .add_user(client.get().id, user_id)
             .await
     }
 
@@ -255,17 +291,21 @@ where
         client_id: Uuid,
         role_id: Uuid,
     ) -> Result<MaintenanceWhitelistEntry, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &realm_name).await?;
         ensure_policy(
-            self.policy.can_update_client(&identity, &realm).await,
+            self.policy
+                .can_update_client(&identity, scope.realm())
+                .await,
             "insufficient permissions to manage maintenance whitelist",
         )?;
+        let client = self
+            .client_repository
+            .get_by_id(scope.id(), client_id)
+            .await
+            .map_err(|_| CoreError::NotFound)?
+            .in_realm(&scope)?;
         self.maintenance_whitelist_repository
-            .add_role(client_id, role_id)
+            .add_role(client.get().id, role_id)
             .await
     }
 
@@ -273,19 +313,26 @@ where
         &self,
         identity: Identity,
         realm_name: String,
-        _client_id: Uuid,
+        client_id: Uuid,
         entry_id: Uuid,
     ) -> Result<(), CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &realm_name).await?;
         ensure_policy(
-            self.policy.can_update_client(&identity, &realm).await,
+            self.policy
+                .can_update_client(&identity, scope.realm())
+                .await,
             "insufficient permissions to manage maintenance whitelist",
         )?;
-        self.maintenance_whitelist_repository.remove(entry_id).await
+        let client = self
+            .client_repository
+            .get_by_id(scope.id(), client_id)
+            .await
+            .map_err(|_| CoreError::NotFound)?
+            .in_realm(&scope)?;
+        let entry = self.load_entry_of_client(entry_id, &client).await?;
+        self.maintenance_whitelist_repository
+            .remove(client.get().id, entry.id)
+            .await
     }
 
     async fn get_client_whitelist(
@@ -294,17 +341,19 @@ where
         realm_name: String,
         client_id: Uuid,
     ) -> Result<Vec<MaintenanceWhitelistEntry>, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &realm_name).await?;
         ensure_policy(
-            self.policy.can_view_client(&identity, &realm).await,
+            self.policy.can_view_client(&identity, scope.realm()).await,
             "insufficient permissions to view maintenance whitelist",
         )?;
+        let client = self
+            .client_repository
+            .get_by_id(scope.id(), client_id)
+            .await
+            .map_err(|_| CoreError::NotFound)?
+            .in_realm(&scope)?;
         self.maintenance_whitelist_repository
-            .get_by_client_id(client_id)
+            .get_by_client_id(client.get().id)
             .await
     }
 
@@ -314,17 +363,15 @@ where
         realm_name: String,
         user_id: Uuid,
     ) -> Result<RealmMaintenanceWhitelistEntry, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &realm_name).await?;
         ensure_policy(
-            self.policy.can_update_client(&identity, &realm).await,
+            self.policy
+                .can_update_client(&identity, scope.realm())
+                .await,
             "insufficient permissions to manage realm maintenance whitelist",
         )?;
         self.realm_maintenance_whitelist_repository
-            .add_user(realm.id, user_id)
+            .add_user(scope.id(), user_id)
             .await
     }
 
@@ -334,17 +381,15 @@ where
         realm_name: String,
         role_id: Uuid,
     ) -> Result<RealmMaintenanceWhitelistEntry, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &realm_name).await?;
         ensure_policy(
-            self.policy.can_update_client(&identity, &realm).await,
+            self.policy
+                .can_update_client(&identity, scope.realm())
+                .await,
             "insufficient permissions to manage realm maintenance whitelist",
         )?;
         self.realm_maintenance_whitelist_repository
-            .add_role(realm.id, role_id)
+            .add_role(scope.id(), role_id)
             .await
     }
 
@@ -354,17 +399,21 @@ where
         realm_name: String,
         entry_id: Uuid,
     ) -> Result<(), CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &realm_name).await?;
         ensure_policy(
-            self.policy.can_update_client(&identity, &realm).await,
+            self.policy
+                .can_update_client(&identity, scope.realm())
+                .await,
             "insufficient permissions to manage realm maintenance whitelist",
         )?;
+        let entry = self
+            .realm_maintenance_whitelist_repository
+            .get_by_id(entry_id)
+            .await?
+            .ok_or(CoreError::NotFound)?
+            .in_realm(&scope)?;
         self.realm_maintenance_whitelist_repository
-            .remove(entry_id)
+            .remove(&entry)
             .await
     }
 
@@ -373,17 +422,13 @@ where
         identity: Identity,
         realm_name: String,
     ) -> Result<Vec<RealmMaintenanceWhitelistEntry>, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &realm_name).await?;
         ensure_policy(
-            self.policy.can_view_client(&identity, &realm).await,
+            self.policy.can_view_client(&identity, scope.realm()).await,
             "insufficient permissions to view realm maintenance whitelist",
         )?;
         self.realm_maintenance_whitelist_repository
-            .get_by_realm_id(realm.id)
+            .get_by_realm_id(scope.id())
             .await
     }
 }

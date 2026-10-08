@@ -1,9 +1,10 @@
 use uuid::Uuid;
 
+use crate::authentication::entities::AuthProtocol;
 use crate::client::entities::ClientType;
 use crate::client::value_objects::{
-    CreateSamlAttributeMapperRequest, CreateWebOriginRequest, SetClientSamlConfigRequest,
-    UpdateClientRequest,
+    CreateSamlAttributeMapperRequest, CreateTokenExchangePolicyRequest, CreateWebOriginRequest,
+    SetClientSamlConfigRequest, UpdateClientRequest,
 };
 
 pub struct CreateClientInput {
@@ -13,10 +14,12 @@ pub struct CreateClientInput {
     pub client_type: ClientType,
     pub service_account_enabled: bool,
     pub public_client: bool,
-    pub protocol: String,
+    pub protocol: AuthProtocol,
     pub enabled: bool,
     pub direct_access_grants_enabled: bool,
     pub oauth_device_code_grant_enabled: bool,
+    pub token_exchange_enabled: bool,
+    pub consent_required: bool,
 }
 
 pub struct CreateRedirectUriInput {
@@ -115,6 +118,23 @@ pub struct DeleteWebOriginInput {
     pub realm_name: String,
     pub client_id: Uuid,
     pub web_origin_id: Uuid,
+}
+
+pub struct CreateTokenExchangePolicyInput {
+    pub realm_name: String,
+    pub client_id: Uuid,
+    pub payload: CreateTokenExchangePolicyRequest,
+}
+
+pub struct GetTokenExchangePoliciesInput {
+    pub realm_name: String,
+    pub client_id: Uuid,
+}
+
+pub struct DeleteTokenExchangePolicyInput {
+    pub realm_name: String,
+    pub client_id: Uuid,
+    pub policy_id: Uuid,
 }
 
 pub struct GetClientSamlConfigInput {

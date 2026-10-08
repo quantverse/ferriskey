@@ -16,6 +16,7 @@ pub struct GetOpenIdConfigurationResponse {
     pub revocation_endpoint: String,
     pub end_session_endpoint: String,
     pub introspection_endpoint: String,
+    pub device_authorization_endpoint: String,
     pub userinfo_endpoint: String,
     pub jwks_uri: String,
     pub grant_types_supported: Vec<String>,
@@ -23,6 +24,12 @@ pub struct GetOpenIdConfigurationResponse {
     pub subject_types_supported: Vec<String>,
     pub id_token_signing_alg_values_supported: Vec<String>,
     pub token_endpoint_auth_methods_supported: Vec<String>,
+    pub code_challenge_methods_supported: Vec<String>,
+    /// OIDC Back-Channel Logout 1.0: clients may register a
+    /// `backchannel_logout_uri` to be told when a session ends.
+    pub backchannel_logout_supported: bool,
+    /// Logout tokens carry the `sid` of the session that ended.
+    pub backchannel_logout_session_supported: bool,
 }
 
 #[utoipa::path(
@@ -71,6 +78,7 @@ pub async fn get_openid_configuration(
         revocation_endpoint: format!("{issuer}/protocol/openid-connect/revoke"),
         end_session_endpoint: format!("{issuer}/protocol/openid-connect/logout"),
         introspection_endpoint: format!("{issuer}/protocol/openid-connect/token/introspect"),
+        device_authorization_endpoint: format!("{issuer}/protocol/openid-connect/auth/device"),
         userinfo_endpoint: format!("{issuer}/protocol/openid-connect/userinfo"),
         jwks_uri: format!("{issuer}/protocol/openid-connect/jwks.json"),
         grant_types_supported: vec![
@@ -78,6 +86,8 @@ pub async fn get_openid_configuration(
             "refresh_token".to_string(),
             "client_credentials".to_string(),
             "password".to_string(),
+            "urn:ietf:params:oauth:grant-type:device_code".to_string(),
+            "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
         ],
         response_types_supported: vec![
             "code".to_string(),
@@ -95,5 +105,8 @@ pub async fn get_openid_configuration(
             "client_secret_basic".to_string(),
             "client_secret_post".to_string(),
         ],
+        code_challenge_methods_supported: vec!["S256".to_string()],
+        backchannel_logout_supported: true,
+        backchannel_logout_session_supported: true,
     }))
 }

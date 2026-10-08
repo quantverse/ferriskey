@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { BaseQuery } from '.'
+import { translate } from '@/lib/i18n'
 
 export interface UserMutateContract<T> {
   realm?: string
@@ -32,6 +33,62 @@ export const useGetUser = ({ realm, userId }: GetUserQueryParams) => {
       },
     }).queryOptions,
     enabled: !!userId && !!realm,
+  })
+}
+
+export const useGetOwnProfile = ({ realm }: BaseQuery) => {
+  return useQuery({
+    ...window.tanstackApi.get('/realms/{realm_name}/users/me', {
+      path: {
+        realm_name: realm || 'master',
+      },
+    }).queryOptions,
+  })
+}
+
+export const useUpdateOwnProfile = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    ...window.tanstackApi.mutation('put', '/realms/{realm_name}/users/me').mutationOptions,
+    onSuccess: (_res, variables) => {
+      const keys = window.tanstackApi.get('/realms/{realm_name}/users/me', {
+        path: {
+          realm_name: variables.path.realm_name,
+        },
+      }).queryKey
+      queryClient.invalidateQueries({ queryKey: keys })
+    },
+  })
+}
+
+export const useGetUserSessions = ({ realm, userId }: GetUserQueryParams) => {
+  return useQuery({
+    ...window.tanstackApi.get('/realms/{realm_name}/users/{user_id}/sessions', {
+      path: {
+        realm_name: realm!,
+        user_id: userId!,
+      },
+    }).queryOptions,
+    enabled: !!userId && !!realm,
+  })
+}
+
+export const useRevokeUserSession = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    ...window.tanstackApi.mutation(
+      'delete',
+      '/realms/{realm_name}/users/{user_id}/sessions/{session_id}'
+    ).mutationOptions,
+    onSuccess: (_res, variables) => {
+      const keys = window.tanstackApi.get('/realms/{realm_name}/users/{user_id}/sessions', {
+        path: {
+          realm_name: variables.path.realm_name,
+          user_id: variables.path.user_id,
+        },
+      }).queryKey
+      queryClient.invalidateQueries({ queryKey: keys })
+    },
   })
 }
 
@@ -204,7 +261,7 @@ export const useDeleteUserAttribute = () => {
           user_id: variables.path.user_id,
         },
       }).queryKey
-      toast.success('Attribute deleted')
+      toast.success(translate('common:toast.attribute.deleted'))
       await queryClient.invalidateQueries({ queryKey: keys })
     },
   })

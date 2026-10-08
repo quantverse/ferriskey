@@ -70,6 +70,14 @@ pub struct Args {
         long_help = "The url to the webapp to use"
     )]
     pub webapp_url: String,
+
+    #[arg(
+        long,
+        env = "WEBHOOK_ALLOW_PRIVATE_ENDPOINTS",
+        default_value_t = false,
+        long_help = "Allow webhook endpoints to resolve to loopback or private addresses. For local development only — never enable this in production. Link-local addresses stay refused regardless."
+    )]
+    pub webhook_allow_private_endpoints: bool,
     #[command(flatten)]
     pub observability: ObservabilityArgs,
     #[command(flatten)]
@@ -86,6 +94,7 @@ impl Default for Args {
             env: Environment::Development,
             log: LogArgs::default(),
             server: ServerArgs::default(),
+            webhook_allow_private_endpoints: false,
             webapp_url: "http://localhost:5555".to_string(),
             observability: ObservabilityArgs::default(),
             security: SecurityArgs::default(),
@@ -286,6 +295,21 @@ pub struct ServerArgs {
         value_parser = parse_root_path,
     )]
     pub root_path: String,
+    #[arg(
+        long = "server-public-url",
+        env = "SERVER_PUBLIC_URL",
+        name = "SERVER_PUBLIC_URL",
+        long_help = "The origin browsers and service providers reach this deployment at, as scheme://host[:port]. Leave unset to derive it from each request's Host header, which is the historical behaviour. Setting it is required for SAML: an entity id is signed into every assertion, so it must not change when a request arrives through a different hostname."
+    )]
+    pub public_url: Option<String>,
+    #[arg(
+        long = "server-trust-forwarded-for",
+        env = "SERVER_TRUST_FORWARDED_FOR",
+        name = "SERVER_TRUST_FORWARDED_FOR",
+        default_value_t = false,
+        long_help = "Read the caller's address from the X-Forwarded-For header instead of the peer of the TCP connection. Leave it off unless a proxy you control is the only way in: when it is on, a client can put any address in that header and the recorded address is whatever it claims. With it off, a deployment behind a proxy records the proxy's address, which is honest but of little use."
+    )]
+    pub trust_forwarded_for: bool,
     #[command(flatten)]
     pub tls: Option<ServerTlsArgs>,
 }
@@ -297,6 +321,8 @@ impl Default for ServerArgs {
             host: "0.0.0.0".into(),
             port: 3333,
             root_path: String::new(),
+            public_url: None,
+            trust_forwarded_for: false,
             tls: None,
         }
     }
@@ -470,6 +496,7 @@ impl From<Args> for FerriskeyConfig {
                 schema: value.db.schema,
             },
             webapp_url: value.webapp_url,
+            webhook_allow_private_endpoints: value.webhook_allow_private_endpoints,
         }
     }
 }

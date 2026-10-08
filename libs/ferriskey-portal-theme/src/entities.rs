@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use ferriskey_domain::realm::RealmId;
+use ferriskey_domain::realm::scope::RealmOwned;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -14,6 +15,12 @@ pub struct PortalTheme {
     pub pages: PortalThemePages,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl RealmOwned for PortalTheme {
+    fn realm_id(&self) -> RealmId {
+        self.realm_id
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
@@ -55,10 +62,11 @@ pub enum PortalPageType {
     /// Like `EmailVerified`, a fully-static heading + text composition is a
     /// valid page — no required blocks.
     DeviceVerified,
+    Consent,
 }
 
 impl PortalPageType {
-    pub const ALL: [PortalPageType; 12] = [
+    pub const ALL: [PortalPageType; 13] = [
         PortalPageType::Login,
         PortalPageType::Register,
         PortalPageType::Totp,
@@ -71,6 +79,7 @@ impl PortalPageType {
         PortalPageType::TotpSetup,
         PortalPageType::DeviceVerify,
         PortalPageType::DeviceVerified,
+        PortalPageType::Consent,
     ];
 }
 
@@ -89,6 +98,7 @@ pub struct PortalThemePages {
     pub totp_setup: serde_json::Value,
     pub device_verify: serde_json::Value,
     pub device_verified: serde_json::Value,
+    pub consent: serde_json::Value,
 }
 
 impl PortalThemePages {
@@ -106,6 +116,7 @@ impl PortalThemePages {
             PortalPageType::TotpSetup => &self.totp_setup,
             PortalPageType::DeviceVerify => &self.device_verify,
             PortalPageType::DeviceVerified => &self.device_verified,
+            PortalPageType::Consent => &self.consent,
         }
     }
 }

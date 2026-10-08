@@ -31,6 +31,7 @@ import {
   TotpSecretBlock,
   FormErrorBannerBlock,
   PortalCaptchaBlock,
+  ConsentScopesBlock,
   treeToReactNode,
 } from '../renderer'
 import { InlineTextEditor } from './inline-text-editor'
@@ -161,6 +162,8 @@ export function renderVisualBlock(
     case 'submit_button':
     case 'device_approve_button':
     case 'device_deny_button':
+    case 'consent_allow_button':
+    case 'consent_deny_button':
     case 'magic_link_button':
     case 'passkey_button':
       return <ButtonBlock node={node} isSelected={isSelected} />
@@ -178,6 +181,12 @@ export function renderVisualBlock(
       return <UserCodeInputBlock node={node} isSelected={isSelected} />
     case 'device_consent':
       return <div data-selected={isSelected}>{treeToReactNode([node])}</div>
+    case 'consent_scopes':
+      return (
+        <div style={chromeStyle(isSelected)}>
+          <ConsentScopesBlock node={node} options={{}} />
+        </div>
+      )
     case 'identity_providers':
       return <IdentityProvidersPreview node={node} isSelected={isSelected} />
     case 'forgot_password_link':
@@ -410,7 +419,7 @@ function ButtonBlock({ node, isSelected }: { node: BuilderNode; isSelected: bool
       <Mail size={16} aria-hidden />
     ) : node.type === 'passkey_button' ? (
       <KeyRound size={16} aria-hidden />
-    ) : node.type === 'device_deny_button' ? (
+    ) : node.type === 'device_deny_button' || node.type === 'consent_deny_button' ? (
       <Ban size={16} aria-hidden />
     ) : null
   const style = mergeStyles(
@@ -710,9 +719,12 @@ function PageContentSlot({ isSelected }: { node: BuilderNode; isSelected: boolea
         // is rendered with `width: 100%` + `align-self: stretch`), otherwise
         // the layout builder paints a content-width placeholder while the
         // live portal renders full-width — and the admin can't tell the two
-        // apart until they ship.
+        // apart until they ship. The runtime slot also grows into whatever
+        // room is left; here a fixed minimum keeps the drop zone reachable
+        // in an otherwise empty layout.
         width: '100%',
         alignSelf: 'stretch',
+        flex: '1 1 auto',
         boxSizing: 'border-box',
         minHeight: 120,
         display: 'flex',

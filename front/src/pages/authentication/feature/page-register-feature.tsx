@@ -4,20 +4,35 @@ import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useNavigate, useParams } from 'react-router'
 import { useEffect, useMemo, useRef } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useRegistrationMutation } from '@/api/auth.api'
+import type { Schemas } from '@/api/api.client'
 import { useAuth } from '@/hooks/use-auth'
 import { RouterParams } from '@/routes/router'
 import { usePublicPasswordPolicy, DEFAULT_PASSWORD_POLICY } from '@/api/password-policy.api'
 import { evaluatePassword } from '../utils/password-policy'
+import { toast } from 'sonner'
+import {
+  apiErrorMessage,
+  apiErrorReason,
+  partitionFieldErrors,
+  validationErrorsFrom,
+} from '@/lib/api-error'
+import { translate } from '@/lib/i18n'
+import { AUTH_NAMESPACE } from '../constants'
 
 function buildRegisterSchema(policy: typeof DEFAULT_PASSWORD_POLICY) {
   return z
     .object({
-      username: z.string().min(1, 'Username is required'),
-      email: z.string().email('Invalid email address'),
+      username: z
+        .string()
+        .min(1, { error: () => translate(`${AUTH_NAMESPACE}:validation.username_required`) }),
+      email: z
+        .string()
+        .email({ error: () => translate(`${AUTH_NAMESPACE}:validation.email_invalid`) }),
       password: z
         .string()
-        .min(1, 'Password is required')
+        .min(1, { error: () => translate(`${AUTH_NAMESPACE}:validation.password_required`) })
         .superRefine((value, ctx) => {
           const result = evaluatePassword(value, policy)
           if (!result.valid) {
@@ -27,20 +42,35 @@ function buildRegisterSchema(policy: typeof DEFAULT_PASSWORD_POLICY) {
             })
           }
         }),
-      confirmPassword: z.string().min(1, 'Please confirm your password'),
+      confirmPassword: z.string().min(1, {
+        error: () => translate(`${AUTH_NAMESPACE}:validation.password_confirm_required`),
+      }),
       firstName: z.string().optional(),
       lastName: z.string().optional(),
     })
     .refine((data) => data.password === data.confirmPassword, {
       path: ['confirmPassword'],
-      message: 'Passwords do not match',
+      error: () => translate(`${AUTH_NAMESPACE}:validation.passwords_mismatch`),
     })
 }
 
 export type RegisterSchema = z.infer<ReturnType<typeof buildRegisterSchema>>
 
+const FIELD_BY_API_FIELD: Record<string, keyof RegisterSchema> = {
+  email: 'email',
+  username: 'username',
+  password: 'password',
+  value: 'password',
+}
+
+const FIELD_BY_REASON: Record<string, keyof RegisterSchema> = {
+  email_already_exists: 'email',
+  username_already_exists: 'username',
+}
+
 export default function PageRegisterFeature() {
   const navigate = useNavigate()
+  const { t } = useTranslation(AUTH_NAMESPACE)
   const { realm_name } = useParams<RouterParams>()
   const { mutate: registration, data } = useRegistrationMutation()
   const { setAuthTokens } = useAuth()
@@ -80,19 +110,47 @@ export default function PageRegisterFeature() {
   }, [isPolicyLoading, resolvedPolicy, form])
 
   function onSubmit(data: RegisterSchema) {
-    registration({
-      body: {
-        email: data.email,
-        first_name: data.firstName,
-        last_name: data.lastName,
-        password: data.password,
-        username: data.username,
-        captcha_token: captchaToken.current,
-      } as never,
-      path: {
-        realm_name: realm_name ?? 'master',
+    registration(
+      {
+        body: {
+          email: data.email,
+          first_name: data.firstName,
+          last_name: data.lastName,
+          password: data.password,
+          username: data.username,
+          captcha_token: captchaToken.current,
+        } as Schemas.RegistrationRequest & { captcha_token?: string },
+        path: {
+          realm_name: realm_name ?? 'master',
+        },
       },
-    })
+      {
+        onError: (error) => {
+          const { byField, unattached } = partitionFieldErrors(
+            validationErrorsFrom(error),
+            (field) => FIELD_BY_API_FIELD[field]
+          )
+
+          for (const [field, message] of byField) {
+            form.setError(field, { type: 'server', message })
+          }
+
+          if (byField.size > 0 && unattached.length === 0) return
+
+          const message =
+            unattached.join(' — ') ||
+            apiErrorMessage(error, t('register.failed'))
+          const field = FIELD_BY_REASON[apiErrorReason(error) ?? '']
+
+          if (field) {
+            form.setError(field, { type: 'server', message })
+            return
+          }
+
+          toast.error(message)
+        },
+      }
+    )
   }
 
   useEffect(() => {
@@ -124,8 +182,8 @@ export default function PageRegisterFeature() {
       onSubmit={onSubmit}
       backToLogin={backToLogin}
       policy={resolvedPolicy}
-      onCaptchaSolve={(t) => {
-        captchaToken.current = t
+      onCaptchaSolve={(token) => {
+        captchaToken.current = token
       }}
     />
   )

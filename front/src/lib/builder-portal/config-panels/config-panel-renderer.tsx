@@ -2,6 +2,7 @@ import { ChevronDown, ChevronUp } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { findNodePath, useBuilderContext, type BuilderNode } from '../../builder-core'
 import { ConfigSection } from './config-section'
+import { ButtonColorSection } from './button-color-section'
 import { DimensionInput } from './dimension-input'
 import { LinkedSidesInput } from './linked-sides-input'
 import { ColorField, SelectField, TextField } from './shared-fields'
@@ -118,6 +119,17 @@ function renderPortalConfigPanelInner(node: BuilderNode, onUpdate: OnUpdate): Re
           {identity}
           <ConfigSection title='Layout'>
             <SelectField
+              label='Display'
+              value={(node.props.display as string) || 'flex'}
+              options={[
+                { label: 'Flex', value: 'flex' },
+                { label: 'Block', value: 'block' },
+                { label: 'Grid', value: 'grid' },
+              ]}
+              onChange={(v) => updateProp('display', v)}
+              allowEmpty={false}
+            />
+            <SelectField
               label='Direction'
               value={node.props.direction as string}
               options={[
@@ -137,6 +149,28 @@ function renderPortalConfigPanelInner(node: BuilderNode, onUpdate: OnUpdate): Re
                 { label: 'Stretch', value: 'stretch' },
               ]}
               onChange={(v) => updateProp('align', v)}
+              allowEmpty={false}
+            />
+            <SelectField
+              label='Justify (main axis)'
+              value={node.props.justifyContent as string}
+              options={[
+                { label: 'Start', value: 'flex-start' },
+                { label: 'Center', value: 'center' },
+                { label: 'End', value: 'flex-end' },
+                { label: 'Space between', value: 'space-between' },
+                { label: 'Space around', value: 'space-around' },
+              ]}
+              onChange={(v) => updateProp('justifyContent', v)}
+            />
+            <SelectField
+              label='Fill page height'
+              value={node.props.flexGrow as string}
+              options={[
+                { label: 'No', value: '' },
+                { label: 'Yes', value: '1' },
+              ]}
+              onChange={(v) => updateProp('flexGrow', v)}
               allowEmpty={false}
             />
             <DimensionInput label='Gap' value={node.props.gap as string} onChange={(v) => updateProp('gap', v)} />
@@ -709,6 +743,7 @@ function renderPortalConfigPanelInner(node: BuilderNode, onUpdate: OnUpdate): Re
               allowEmpty={false}
             />
           </ConfigSection>
+          <ButtonColorSection node={node} updateProp={updateProp} />
         </div>
       )
 
@@ -755,21 +790,25 @@ function renderPortalConfigPanelInner(node: BuilderNode, onUpdate: OnUpdate): Re
               allowEmpty={false}
             />
           </ConfigSection>
+          <ButtonColorSection node={node} updateProp={updateProp} />
         </div>
       )
 
     case 'device_approve_button':
     case 'device_deny_button':
-      // Hard-wired action: approve submits the form (action=approve), deny
-      // fires the `device-deny` action handled by the portal wrapper. Only
-      // visual style is editable here — same pattern as submit_button.
+    case 'consent_allow_button':
+    case 'consent_deny_button':
       return (
         <div className='flex flex-col'>
           {identity}
           <div className='border-b border-border bg-muted/40 px-3 py-2 text-[11px] text-muted-foreground'>
             {node.type === 'device_approve_button'
               ? 'Approve action is locked — this button submits the device authorisation when clicked.'
-              : 'Deny action is locked — this button rejects the device authorisation when clicked.'}
+              : node.type === 'device_deny_button'
+                ? 'Deny action is locked — this button rejects the device authorisation when clicked.'
+                : node.type === 'consent_allow_button'
+                  ? 'Allow action is locked — this button submits the consent decision with whichever optional scopes are toggled on.'
+                  : 'Deny action is locked — this button submits the consent decision with no optional scopes approved.'}
           </div>
           <ConfigSection title='Style'>
             <SelectField
@@ -805,6 +844,7 @@ function renderPortalConfigPanelInner(node: BuilderNode, onUpdate: OnUpdate): Re
               allowEmpty={false}
             />
           </ConfigSection>
+          <ButtonColorSection node={node} updateProp={updateProp} />
         </div>
       )
 
@@ -951,6 +991,23 @@ function renderPortalConfigPanelInner(node: BuilderNode, onUpdate: OnUpdate): Re
               label='Button label prefix'
               value={node.props.buttonLabel as string}
               onChange={(v) => updateProp('buttonLabel', v)}
+            />
+          </ConfigSection>
+        </div>
+      )
+
+    case 'consent_scopes':
+      return (
+        <div className='flex flex-col'>
+          {identity}
+          <div className='border-b border-border bg-muted/40 px-3 py-2 text-[11px] text-muted-foreground'>
+            Scope list — the client name and the default / optional scopes come from the consent request at runtime. Only the intro label is editable here.
+          </div>
+          <ConfigSection title='Content'>
+            <TextField
+              label='Intro label'
+              value={node.props.label as string}
+              onChange={(v) => updateProp('label', v)}
             />
           </ConfigSection>
         </div>
@@ -1106,8 +1163,45 @@ function renderPortalConfigPanelInner(node: BuilderNode, onUpdate: OnUpdate): Re
         <div className='flex flex-col'>
           {identity}
           <div className='px-3 py-2 text-xs text-muted-foreground'>
-            The page content slot is replaced at runtime by the page using this layout. No configuration needed.
+            The page using this layout is rendered here. It fills the viewport and
+            centres its content by default — clear a field to let the slot hug the
+            page instead.
           </div>
+          <ConfigSection title='Size'>
+            <DimensionInput
+              label='Min height'
+              value={node.props.minHeight as string}
+              onChange={(v) => updateProp('minHeight', v)}
+            />
+            <DimensionInput
+              label='Min width'
+              value={node.props.minWidth as string}
+              onChange={(v) => updateProp('minWidth', v)}
+            />
+          </ConfigSection>
+          <ConfigSection title='Alignment' defaultOpen={false}>
+            <SelectField
+              label='Vertical'
+              value={node.props.justifyContent as string}
+              options={[
+                { label: 'Top', value: 'flex-start' },
+                { label: 'Center', value: 'center' },
+                { label: 'Bottom', value: 'flex-end' },
+              ]}
+              onChange={(v) => updateProp('justifyContent', v)}
+            />
+            <SelectField
+              label='Horizontal'
+              value={node.props.alignItems as string}
+              options={[
+                { label: 'Left', value: 'flex-start' },
+                { label: 'Center', value: 'center' },
+                { label: 'Right', value: 'flex-end' },
+                { label: 'Stretch', value: 'stretch' },
+              ]}
+              onChange={(v) => updateProp('alignItems', v)}
+            />
+          </ConfigSection>
         </div>
       )
 

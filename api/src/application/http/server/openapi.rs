@@ -1,16 +1,19 @@
 use ferriskey_api_abyss::AbyssApiDoc;
+use ferriskey_api_account::router::AccountApiDoc;
 use ferriskey_api_aegis::router::AegisApiDoc;
 use ferriskey_api_authentication::router::AuthenticationApiDoc;
 use ferriskey_api_broker::BrokerApiDoc;
 use ferriskey_api_client::router::ClientApiDoc;
 use ferriskey_api_compass::router::CompassApiDoc;
+use ferriskey_api_consent::router::ConsentApiDoc;
 use ferriskey_api_email_template::router::{EmailTemplateApiDoc, EmailTemplateVariablesApiDoc};
-use ferriskey_api_maintenance::router::MaintenanceApiDoc;
+use ferriskey_api_maintenance::router::{MaintenanceApiDoc, RealmMaintenanceApiDoc};
 use ferriskey_api_organization::router::OrganizationApiDoc;
 use ferriskey_api_portal_layouts::router::{PortalLayoutsApiDoc, PortalLayoutsPublicApiDoc};
 use ferriskey_api_portal_theme::router::{PortalThemeApiDoc, PortalThemePublicApiDoc};
 use ferriskey_api_realm::router::RealmApiDoc;
 use ferriskey_api_role::router::RoleApiDoc;
+use ferriskey_api_saml::router::SamlApiDoc;
 use ferriskey_api_seawatch::router::SeawatchApiDoc;
 use ferriskey_api_trident::router::TridentApiDoc;
 use ferriskey_api_user::router::UserApiDoc;
@@ -26,12 +29,15 @@ use utoipa::OpenApi;
     nest(
         (path = "/realms", api = RealmApiDoc),
         (path = "/realms/{realm_name}/clients", api = ClientApiDoc),
+        (path = "/realms/{realm_name}/users", api = AccountApiDoc),
         (path = "/realms/{realm_name}/users", api = UserApiDoc),
         (path = "/realms/{realm_name}", api = AuthenticationApiDoc),
+        (path = "/realms/{realm_name}", api = SamlApiDoc),
         (path = "/realms/{realm_name}/roles", api = RoleApiDoc),
         (path = "/realms/{realm_name}/webhooks", api = WebhookApiDoc),
         (path = "/realms/{realm_name}", api = TridentApiDoc),
         (path = "/realms/{realm_name}", api = SeawatchApiDoc),
+        (path = "/realms/{realm_name}", api = ConsentApiDoc),
         (path = "/realms/{realm_name}", api = AbyssApiDoc),
         (path = "/realms/{realm_name}", api = BrokerApiDoc),
         (path = "/realms/{realm_name}", api = AegisApiDoc),
@@ -43,7 +49,8 @@ use utoipa::OpenApi;
         (path = "/realms/{realm_name}/portal-layouts/public", api = PortalLayoutsPublicApiDoc),
         (path = "/email-templates/variables", api = EmailTemplateVariablesApiDoc),
         (path = "/realms/{realm_name}/organizations", api = OrganizationApiDoc),
-        (path = "/realms/{realm_name}/clients", api = MaintenanceApiDoc)
+        (path = "/realms/{realm_name}/clients", api = MaintenanceApiDoc),
+        (path = "/realms/{realm_name}", api = RealmMaintenanceApiDoc)
     )
 )]
 pub struct ApiDoc;

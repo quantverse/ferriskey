@@ -7,6 +7,7 @@ use crate::auth::Identity;
 use crate::common::app_errors::CoreError;
 use crate::common::policies::Policy;
 use crate::realm::ports::RealmRepository;
+use crate::realm::scope::{RealmScope, UnscopedOption};
 use crate::session::entities::{SessionError, UserSession};
 use crate::session::ports::{
     TokenRevocationPort, UserSessionManagementService, UserSessionRepository, UserSessionService,
@@ -108,18 +109,14 @@ where
         realm_name: String,
         user_id: Uuid,
     ) -> Result<Vec<UserSession>, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &realm_name).await?;
 
         let actor = self.policy.get_user_from_identity(&identity).await?;
 
         if actor.id != user_id {
             let permissions = self
                 .policy
-                .get_permission_for_target_realm(&actor, &realm)
+                .get_permission_for_target_realm(&actor, scope.realm())
                 .await?;
 
             let has_permission = crate::role::permission::Permissions::has_one_of_permissions(
@@ -140,7 +137,7 @@ where
 
         let sessions = self
             .session_repository
-            .find_all_by_user_and_realm(user_id, realm.id.into())
+            .find_all_by_user_and_realm(user_id, scope.id().into())
             .await
             .map_err(|_| CoreError::InternalServerError)?;
 
@@ -154,18 +151,14 @@ where
         user_id: Uuid,
         session_id: Uuid,
     ) -> Result<UserSession, CoreError> {
-        let realm = self
-            .realm_repository
-            .get_by_name(&realm_name)
-            .await?
-            .ok_or(CoreError::InvalidRealm)?;
+        let scope = RealmScope::resolve(self.realm_repository.as_ref(), &realm_name).await?;
 
         let actor = self.policy.get_user_from_identity(&identity).await?;
 
         if actor.id != user_id {
             let permissions = self
                 .policy
-                .get_permission_for_target_realm(&actor, &realm)
+                .get_permission_for_target_realm(&actor, scope.realm())
                 .await?;
 
             let has_permission = crate::role::permission::Permissions::has_one_of_permissions(
@@ -188,23 +181,32 @@ where
             .find_by_id(session_id)
             .await
             .map_err(|_| CoreError::InternalServerError)?
+            .in_realm(&scope)?
             .ok_or(CoreError::SessionNotFound)?;
 
-        let realm_id_uuid: uuid::Uuid = realm.id.into();
-        if session.user_id != user_id || session.realm_id != realm_id_uuid {
+        if session.get().user_id != user_id {
             return Err(CoreError::SessionNotFound);
         }
 
+        // Cut the SSO cookie first: while it still resolves, `/auth` can mint
+        // tokens bound to this session that the revocation below would miss.
+        // The row stays until the tokens are gone so a failed cascade can be
+        // retried.
+        self.session_repository
+            .clear_sso_token_hash(&session)
+            .await
+            .map_err(|_| CoreError::InternalServerError)?;
+
         self.token_revocation
-            .revoke_session_tokens(session_id)
+            .revoke_session_tokens(&session)
             .await?;
 
         self.session_repository
-            .delete(&session_id)
+            .delete(&session)
             .await
             .map_err(|_| CoreError::SessionDeleteError)?;
 
-        Ok(session)
+        Ok(session.into_inner())
     }
 }
 
@@ -212,17 +214,46 @@ where
 mod tests {
     use super::*;
     use crate::auth::Identity;
-    use crate::client::ports::MockClientRepository;
-    use crate::common::policies::FerriskeyPolicy;
     use crate::realm::ports::MockRealmRepository;
+    use crate::realm::scope::Unscoped;
     use crate::realm::{Realm, RealmId};
+    use crate::role::permission::Permissions;
     use crate::session::ports::{MockTokenRevocationPort, MockUserSessionRepository};
     use crate::user::entities::User;
-    use crate::user::ports::{MockUserRepository, MockUserRoleRepository};
+    use std::collections::HashSet;
     use uuid::Uuid;
 
-    type TestPolicy =
-        FerriskeyPolicy<MockUserRepository, MockClientRepository, MockUserRoleRepository>;
+    /// The engine lives in `ferriskey-authz`, which the kernel cannot depend
+    /// on; these tests only need the caller resolved from its identity.
+    struct TestPolicy;
+
+    impl Policy for TestPolicy {
+        async fn get_user_from_identity(&self, identity: &Identity) -> Result<User, CoreError> {
+            match identity {
+                Identity::User(user) => Ok(user.clone()),
+                Identity::Client(_) => Err(CoreError::Forbidden("no service account".to_string())),
+            }
+        }
+
+        async fn get_user_permissions(
+            &self,
+            _user: &User,
+        ) -> Result<HashSet<Permissions>, CoreError> {
+            Ok(HashSet::new())
+        }
+
+        async fn get_permission_for_target_realm(
+            &self,
+            _user: &User,
+            _target_realm: &Realm,
+        ) -> Result<HashSet<Permissions>, CoreError> {
+            Ok(HashSet::new())
+        }
+
+        fn can_access_realm(&self, user_realm: &Realm, target_realm: &Realm) -> bool {
+            user_realm.id == target_realm.id
+        }
+    }
 
     type TestManagementService = UserSessionManagementServiceImpl<
         MockRealmRepository,
@@ -260,6 +291,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
             failed_login_attempts: 0,
             locked_until: None,
+            locale: None,
         }
     }
 
@@ -268,16 +300,10 @@ mod tests {
         session_repo: MockUserSessionRepository,
         revoker: MockTokenRevocationPort,
     ) -> TestManagementService {
-        let policy = FerriskeyPolicy::new(
-            Arc::new(MockUserRepository::new()),
-            Arc::new(MockClientRepository::new()),
-            Arc::new(MockUserRoleRepository::new()),
-        );
-
         UserSessionManagementServiceImpl::new(
             Arc::new(realm_repo),
             Arc::new(session_repo),
-            Arc::new(policy),
+            Arc::new(TestPolicy),
             Arc::new(revoker),
         )
     }
@@ -297,20 +323,28 @@ mod tests {
             .expect_get_by_name()
             .return_once(move |_| Box::pin(async move { Ok(Some(realm_clone)) }));
 
+        let mut seq = mockall::Sequence::new();
         let mut session_repo = MockUserSessionRepository::new();
+        let mut revoker = MockTokenRevocationPort::new();
         session_repo
             .expect_find_by_id()
-            .return_once(move |_| Box::pin(async move { Ok(Some(session)) }));
+            .return_once(move |_| Box::pin(async move { Ok(Some(Unscoped::new(session))) }));
+        session_repo
+            .expect_clear_sso_token_hash()
+            .withf(move |session| session.get().id == session_id)
+            .times(1)
+            .in_sequence(&mut seq)
+            .return_once(|_| Box::pin(async { Ok(()) }));
+        revoker
+            .expect_revoke_session_tokens()
+            .withf(move |session| session.get().id == session_id)
+            .times(1)
+            .in_sequence(&mut seq)
+            .return_once(|_| Box::pin(async { Ok(()) }));
         session_repo
             .expect_delete()
             .times(1)
-            .return_once(|_| Box::pin(async { Ok(()) }));
-
-        let mut revoker = MockTokenRevocationPort::new();
-        revoker
-            .expect_revoke_session_tokens()
-            .with(mockall::predicate::eq(session_id))
-            .times(1)
+            .in_sequence(&mut seq)
             .return_once(|_| Box::pin(async { Ok(()) }));
 
         let svc = build_service(realm_repo, session_repo, revoker);
@@ -345,7 +379,11 @@ mod tests {
         let mut session_repo = MockUserSessionRepository::new();
         session_repo
             .expect_find_by_id()
-            .return_once(move |_| Box::pin(async move { Ok(Some(session)) }));
+            .return_once(move |_| Box::pin(async move { Ok(Some(Unscoped::new(session))) }));
+        session_repo
+            .expect_clear_sso_token_hash()
+            .times(1)
+            .return_once(|_| Box::pin(async { Ok(()) }));
         session_repo.expect_delete().never();
 
         let mut revoker = MockTokenRevocationPort::new();
@@ -371,6 +409,92 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn revoke_session_stops_when_the_sso_cookie_cannot_be_cut() {
+        let realm = make_realm("test-realm");
+        let realm_uuid: Uuid = realm.id.into();
+        let user = make_user(&realm);
+        let user_id = user.id;
+        let session = make_session(user_id, realm_uuid);
+        let session_id = session.id;
+
+        let mut realm_repo = MockRealmRepository::new();
+        let realm_clone = realm.clone();
+        realm_repo
+            .expect_get_by_name()
+            .return_once(move |_| Box::pin(async move { Ok(Some(realm_clone)) }));
+
+        let mut session_repo = MockUserSessionRepository::new();
+        session_repo
+            .expect_find_by_id()
+            .return_once(move |_| Box::pin(async move { Ok(Some(Unscoped::new(session))) }));
+        session_repo
+            .expect_clear_sso_token_hash()
+            .times(1)
+            .return_once(|_| Box::pin(async { Err(SessionError::UpdateError) }));
+        session_repo.expect_delete().never();
+
+        let mut revoker = MockTokenRevocationPort::new();
+        revoker.expect_revoke_session_tokens().never();
+
+        let svc = build_service(realm_repo, session_repo, revoker);
+
+        let result = svc
+            .revoke_session(
+                Identity::User(user),
+                "test-realm".to_string(),
+                user_id,
+                session_id,
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "a session whose SSO cookie still resolves must not be reported revoked"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_session_refuses_a_session_of_another_realm() {
+        let realm = make_realm("test-realm");
+        let user = make_user(&realm);
+        let user_id = user.id;
+        let session = make_session(user_id, Uuid::new_v4());
+        let session_id = session.id;
+
+        let mut realm_repo = MockRealmRepository::new();
+        let realm_clone = realm.clone();
+        realm_repo
+            .expect_get_by_name()
+            .return_once(move |_| Box::pin(async move { Ok(Some(realm_clone)) }));
+
+        let mut session_repo = MockUserSessionRepository::new();
+        session_repo
+            .expect_find_by_id()
+            .return_once(move |_| Box::pin(async move { Ok(Some(Unscoped::new(session))) }));
+        session_repo.expect_clear_sso_token_hash().never();
+        session_repo.expect_delete().never();
+
+        let mut revoker = MockTokenRevocationPort::new();
+        revoker.expect_revoke_session_tokens().never();
+
+        let svc = build_service(realm_repo, session_repo, revoker);
+
+        let result = svc
+            .revoke_session(
+                Identity::User(user),
+                "test-realm".to_string(),
+                user_id,
+                session_id,
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(CoreError::NotFound)),
+            "a session of another realm must be refused as absent"
+        );
+    }
+
     fn make_session(user_id: Uuid, realm_id: Uuid) -> UserSession {
         UserSession {
             id: Uuid::new_v4(),
@@ -382,6 +506,9 @@ mod tests {
             expires_at: chrono::Utc::now() + Duration::hours(1),
             last_seen_at: None,
             soft_expiry_duration: None,
+            sso_token_hash: None,
+            persistent: false,
+            authenticated_at: chrono::Utc::now(),
         }
     }
 
@@ -425,6 +552,29 @@ mod tests {
         assert!(!session.is_expired());
     }
 
+    #[test]
+    fn only_a_persistent_session_gives_its_cookie_a_max_age() {
+        let mut session = UserSession::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            None,
+            None,
+            Duration::hours(1),
+            None,
+        );
+        assert_eq!(
+            session.cookie_max_age(),
+            None,
+            "a session nobody asked to remember must die with the browser"
+        );
+
+        session.persistent = true;
+        let max_age = session
+            .cookie_max_age()
+            .expect("a remembered session outlives the browser");
+        assert!((3590..=3600).contains(&max_age), "got {max_age}");
+    }
+
     #[tokio::test]
     async fn session_state_is_expired_when_past_expiry() {
         let user_id = Uuid::new_v4();
@@ -439,6 +589,9 @@ mod tests {
             expires_at: chrono::Utc::now() - Duration::hours(1),
             last_seen_at: None,
             soft_expiry_duration: None,
+            sso_token_hash: None,
+            persistent: false,
+            authenticated_at: chrono::Utc::now() - Duration::hours(2),
         };
         assert!(session.is_expired());
         assert_eq!(
