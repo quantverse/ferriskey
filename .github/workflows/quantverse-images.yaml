@@ -105,8 +105,8 @@ jobs:
           target: ${{ matrix.target }}
           platforms: ${{ matrix.runner.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Baked into the webapp/standalone bundles at build time; set it as a
-          # repository variable. Empty disables the captcha widget.
+          # Optional build-time Cap endpoint (repository variable). When empty
+          # the front reads it at runtime from /config.json (CAP_API_ENDPOINT).
           build-args: |
             VITE_CAP_API_ENDPOINT=${{ vars.VITE_CAP_API_ENDPOINT }}
           cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:${{ matrix.target }}-${{ matrix.runner.arch }}

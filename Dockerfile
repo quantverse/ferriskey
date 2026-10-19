@@ -71,8 +71,9 @@ RUN pnpm install --frozen-lockfile
 
 COPY front/ .
 
-# Cap proof-of-work captcha endpoint, baked in at build time. When empty the
-# CapCaptcha widget renders nothing (captcha effectively disabled on the front).
+# Optional build-time Cap proof-of-work captcha endpoint. When empty the
+# endpoint comes from /config.json at runtime instead (CAP_API_ENDPOINT, or
+# derived from CAP_VERIFY_URL + CAP_SITE_KEY by the container entrypoint).
 # Point this at the Cap server's site URL, e.g. http://localhost:3000/<site-key>/
 ARG VITE_CAP_API_ENDPOINT=""
 

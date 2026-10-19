@@ -1,3 +1,4 @@
 {
-    "api_url": "${API_URL}"
+    "api_url": "${API_URL}",
+    "cap_api_endpoint": "${CAP_API_ENDPOINT}"
 }
