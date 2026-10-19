@@ -11,6 +11,7 @@ import { Toaster } from './components/ui/sonner'
 import { BasicSpinner } from './components/ui/spinner'
 import { useAuth } from './hooks/use-auth'
 import { useConfig } from './hooks/use-config'
+import { resolveCapEndpoint } from './lib/cap-endpoint'
 import { useLocaleSync } from './hooks/use-locale'
 import PageAuthentication from './pages/authentication/page-authentication'
 import IamApp from './iam-app'
@@ -21,6 +22,7 @@ declare global {
     tanstackApi: TanstackQueryApiClient
     apiUrl: string
     axios: AxiosInstance
+    capApiEndpoint?: string
   }
 }
 
@@ -141,16 +143,25 @@ function App() {
 
   useEffect(() => {
     const init = async () => {
+      // Runtime config written by the container entrypoint. Also read when
+      // VITE_API_URL is baked in, because it carries the Cap endpoint.
+      let runtimeConfig: { api_url?: unknown; cap_api_endpoint?: unknown }
+      try {
+        const data = await fetch('/config.json')
+        runtimeConfig = (await data.json()) ?? {}
+      } catch {
+        runtimeConfig = {}
+      }
+
+      window.capApiEndpoint = resolveCapEndpoint(
+        import.meta.env.VITE_CAP_API_ENDPOINT,
+        runtimeConfig.cap_api_endpoint
+      )
+
       let uri = import.meta.env.VITE_API_URL?.trim()
 
       if (isUnresolvedApiUrl(uri)) {
-        try {
-          const data = await fetch('/config.json')
-          const result = await data.json()
-          uri = typeof result?.api_url === 'string' ? result.api_url.trim() : ''
-        } catch {
-          uri = ''
-        }
+        uri = typeof runtimeConfig.api_url === 'string' ? runtimeConfig.api_url.trim() : ''
       }
 
       if (isUnresolvedApiUrl(uri)) {

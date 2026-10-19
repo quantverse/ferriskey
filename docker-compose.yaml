@@ -123,9 +123,8 @@ services:
       context: .
       target: standalone
       args:
-        # Baked into the frontend bundle at build time. Must match the Cap
-        # site key created in the Cap dashboard (http://localhost:3000).
-        # Format: http://localhost:3000/<site-key>/
+        # Optional build-time override of CAP_API_ENDPOINT (below), baked
+        # into the frontend bundle. Format: http://localhost:3000/<site-key>/
         VITE_CAP_API_ENDPOINT: ${VITE_CAP_API_ENDPOINT:-}
     environment:
       DATABASE_HOST: db
@@ -143,6 +142,10 @@ services:
       CAP_SITE_KEY: ${CAP_SITE_KEY:-}
       CAP_SECRET: ${CAP_SECRET:-}
       CAP_FAIL_OPEN: ${CAP_FAIL_OPEN:-false}
+      # Browser-reachable Cap widget endpoint, written into /config.json at
+      # start-up. Needed here because CAP_VERIFY_URL is in-network only.
+      # Format: http://localhost:3000/<site-key>/
+      CAP_API_ENDPOINT: ${CAP_API_ENDPOINT:-}
     ports:
       - 8090:80
     depends_on:

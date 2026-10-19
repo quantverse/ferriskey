@@ -1138,7 +1138,7 @@ function renderPortalConfigPanelInner(node: BuilderNode, onUpdate: OnUpdate): Re
           {identity}
           <div className='border-b border-border bg-muted/40 px-3 py-2 text-[11px] text-muted-foreground'>
             Renders the Cap proof-of-work widget only when the Cap endpoint is
-            configured (VITE_CAP_API_ENDPOINT). On submit it sends the solved
+            configured (CAP_API_ENDPOINT). On submit it sends the solved
             token. Add this block to login &amp; register pages when captcha is
             enforced — otherwise those submissions are rejected.
           </div>

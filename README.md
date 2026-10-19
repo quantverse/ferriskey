@@ -205,11 +205,10 @@ Two sides must be configured: the **backend** (enforcement) and the **frontend**
 | `CAP_SITE_KEY`            | backend  | `""`               | Site key minted in the Cap dashboard. |
 | `CAP_SECRET`              | backend  | `""`               | Secret minted in the Cap dashboard. |
 | `CAP_FAIL_OPEN`           | backend  | `false`            | If `true`, allow requests through when the Cap service is unreachable (fail-open). Default fails closed with `503`. |
-| `VITE_CAP_API_ENDPOINT`   | frontend | `""`               | **Build-time** browser-reachable widget endpoint, e.g. `http://localhost:3000/<site-key>/`. When empty the widget renders nothing. |
+| `CAP_API_ENDPOINT`        | frontend | derived            | **Runtime** browser-reachable widget endpoint, e.g. `http://localhost:3000/<site-key>/`, written into `/config.json` by the container entrypoint. When unset and `CAP_ENABLED=true`, it is derived as `<CAP_VERIFY_URL>/<CAP_SITE_KEY>/`. When empty the widget renders nothing. |
+| `VITE_CAP_API_ENDPOINT`   | frontend | `""`               | Optional **build-time** override of `CAP_API_ENDPOINT`, baked into the bundle. Takes precedence when set. |
 
-> **Browser vs. in-network URL:** the browser reaches Cap at `localhost:3000` (`VITE_CAP_API_ENDPOINT`), while the API reaches it in-network at `http://cap:3000` (`CAP_VERIFY_URL`).
->
-> **`VITE_CAP_API_ENDPOINT` is baked in at build time**, so changing it requires rebuilding the frontend (`--build`), not just a restart.
+> **Browser vs. in-network URL:** the browser reaches Cap at `localhost:3000` (`CAP_API_ENDPOINT`), while the API reaches it in-network at `http://cap:3000` (`CAP_VERIFY_URL`). When `CAP_VERIFY_URL` is a public URL (e.g. `https://cap.example.com`), you can leave `CAP_API_ENDPOINT` unset and let it be derived.
 
 ### Enabling captcha (standalone compose)
 
@@ -227,10 +226,10 @@ Two sides must be configured: the **backend** (enforcement) and the **frontend**
    CAP_ENABLED=true
    CAP_SITE_KEY=<site-key>
    CAP_SECRET=<secret>
-   VITE_CAP_API_ENDPOINT=http://localhost:3000/<site-key>/
+   CAP_API_ENDPOINT=http://localhost:3000/<site-key>/
    ```
 
-3. Rebuild and start the stack (the frontend env var is baked in at build time):
+3. Rebuild and start the stack:
 
    ```bash
    docker compose --profile standalone up -d --build

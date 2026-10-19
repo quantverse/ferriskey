@@ -912,7 +912,8 @@ export function FormErrorBannerBlock({
  * written into the hidden input, so the surrounding <form>'s FormData carries
  * it to the submit handler exactly like any other field — no wrapper plumbing.
  *
- * The widget itself only appears when `VITE_CAP_API_ENDPOINT` is configured
+ * The widget itself only appears when a Cap endpoint is configured
+ * (`CAP_API_ENDPOINT` at runtime or `VITE_CAP_API_ENDPOINT` at build time)
  * (CapCaptcha returns null otherwise); the hidden input is always present so
  * the field exists in FormData regardless.
  *
